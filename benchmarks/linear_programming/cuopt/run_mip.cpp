@@ -17,22 +17,26 @@
 #include "initial_solution_reader.hpp"
 #include "mip_test_instances.hpp"
 
+#include <cstdio>
 #include <cuopt/linear_programming/mip/solver_settings.hpp>
 #include <cuopt/linear_programming/mip/solver_solution.hpp>
 #include <cuopt/linear_programming/optimization_problem.hpp>
 #include <cuopt/linear_programming/solve.hpp>
-#include <cuopt/logger.hpp>
 #include <mps_parser/parser.hpp>
+#include <utilities/logger.hpp>
 
-#include <omp.h>
 #include <raft/core/handle.hpp>
 
 #include <rmm/mr/device/cuda_async_memory_resource.hpp>
+#include <rmm/mr/device/limiting_resource_adaptor.hpp>
+#include <rmm/mr/device/logging_resource_adaptor.hpp>
 #include <rmm/mr/device/pool_memory_resource.hpp>
+#include <rmm/mr/device/tracking_resource_adaptor.hpp>
 
 #include <rmm/mr/device/owning_wrapper.hpp>
 
 #include <fcntl.h>
+#include <omp.h>
 #include <sys/file.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -76,10 +80,11 @@ void merge_result_files(const std::string& out_dir,
 void write_to_output_file(const std::string& out_dir,
                           const std::string& base_filename,
                           int gpu_id,
+                          int n_gpus,
                           int batch_id,
                           const std::string& data)
 {
-  int output_id        = batch_id * 8 + gpu_id;
+  int output_id        = batch_id * n_gpus + gpu_id;
   std::string filename = out_dir + "/result_" + std::to_string(output_id) + ".txt";
   std::ofstream outfile(filename, std::ios_base::app);
   if (outfile.is_open()) {
@@ -92,18 +97,17 @@ void write_to_output_file(const std::string& out_dir,
 
 inline auto make_async() { return std::make_shared<rmm::mr::cuda_async_memory_resource>(); }
 
-// reads a solution from an input file. The input file needs to be csv formatted
-// var_name,val
-std::vector<double> read_solution_from_file(const std::string file_path,
-                                            const std::vector<std::string>& var_names)
+void read_single_solution_from_path(const std::string& path,
+                                    const std::vector<std::string>& var_names,
+                                    std::vector<std::vector<double>>& solutions)
 {
   solution_reader_t reader;
-  bool success = reader.readFromCsv(file_path);
+  bool success = reader.read_from_sol(path);
   if (!success) {
-    CUOPT_LOG_INFO("Initial solution reading error!");
-    exit(-1);
+    CUOPT_LOG_ERROR("Initial solution reading error!");
   } else {
-    CUOPT_LOG_INFO("Success reading csv! Number of var vals %lu", reader.data_map.size());
+    CUOPT_LOG_INFO(
+      "Success reading file %s Number of var vals %lu", path.c_str(), reader.data_map.size());
   }
   std::vector<double> assignment;
   for (auto name : var_names) {
@@ -112,20 +116,43 @@ std::vector<double> read_solution_from_file(const std::string file_path,
     if ((it != reader.data_map.end())) {
       val = it->second;
     } else {
-      CUOPT_LOG_INFO("Variable %s has no input value ", name.c_str());
+      CUOPT_LOG_TRACE("Variable %s has no input value ", name.c_str());
       val = 0.;
     }
     assignment.push_back(val);
   }
-  CUOPT_LOG_INFO("Adding a solution with size %lu ", assignment.size());
-  return assignment;
+  if (assignment.size() > 0) {
+    CUOPT_LOG_INFO("Adding a solution with size %lu ", assignment.size());
+    solutions.push_back(assignment);
+  }
+}
+
+// reads a solution from an input file. The input file needs to be csv formatted
+// var_name,val
+std::vector<std::vector<double>> read_solution_from_dir(const std::string file_path,
+                                                        const std::string& mps_file_name,
+                                                        const std::vector<std::string>& var_names)
+{
+  std::vector<std::vector<double>> initial_solutions;
+  std::string mps_file_name_no_ext = mps_file_name.substr(0, mps_file_name.find_last_of("."));
+  // check if a directory with the given mps file exists
+  std::string initial_solution_dir = file_path + "/" + mps_file_name_no_ext;
+  if (std::filesystem::exists(initial_solution_dir)) {
+    for (const auto& entry : std::filesystem::directory_iterator(initial_solution_dir)) {
+      read_single_solution_from_path(entry.path(), var_names, initial_solutions);
+    }
+  } else {
+    read_single_solution_from_path(file_path, var_names, initial_solutions);
+  }
+  return initial_solutions;
 }
 
 int run_single_file(std::string file_path,
                     int device,
                     int batch_id,
+                    int n_gpus,
                     std::string out_dir,
-                    std::optional<std::string> input_file_dir,
+                    std::optional<std::string> initial_solution_dir,
                     bool heuristics_only,
                     int num_cpu_threads,
                     bool write_log_file,
@@ -163,23 +190,39 @@ int run_single_file(std::string file_path,
     CUOPT_LOG_ERROR("Parsing MPS failed exiting!");
     return -1;
   }
-  if (input_file_dir.has_value()) {
-    auto initial_solution =
-      read_solution_from_file(input_file_dir.value(), mps_data_model.get_variable_names());
-    settings.set_initial_solution(initial_solution.data(), initial_solution.size());
-    test_constraint_sanity(mps_data_model,
-                           initial_solution,
-                           settings.tolerances.absolute_tolerance,
-                           settings.tolerances.relative_tolerance,
-                           settings.tolerances.integrality_tolerance);
+  if (initial_solution_dir.has_value()) {
+    auto initial_solutions = read_solution_from_dir(
+      initial_solution_dir.value(), base_filename, mps_data_model.get_variable_names());
+    for (auto& initial_solution : initial_solutions) {
+      bool feasible_variables =
+        test_constraint_and_variable_sanity(mps_data_model,
+                                            initial_solution,
+                                            settings.tolerances.absolute_tolerance,
+                                            settings.tolerances.relative_tolerance,
+                                            settings.tolerances.integrality_tolerance);
+      if (feasible_variables) {
+        settings.add_initial_solution(
+          initial_solution.data(), initial_solution.size(), handle_.get_stream());
+      }
+    }
   }
 
-  settings.time_limit      = time_limit;
-  settings.heuristics_only = heuristics_only;
-  settings.num_cpu_threads = num_cpu_threads;
-  settings.log_to_console  = log_to_console;
-  auto start_run_solver    = std::chrono::high_resolution_clock::now();
+  settings.time_limit                    = time_limit;
+  settings.heuristics_only               = heuristics_only;
+  settings.num_cpu_threads               = num_cpu_threads;
+  settings.log_to_console                = log_to_console;
+  settings.tolerances.relative_tolerance = 1e-12;
+  settings.tolerances.absolute_tolerance = 1e-6;
+  settings.presolve                      = true;
+  cuopt::linear_programming::benchmark_info_t benchmark_info;
+  settings.benchmark_info_ptr = &benchmark_info;
+  auto start_run_solver       = std::chrono::high_resolution_clock::now();
   auto solution = cuopt::linear_programming::solve_mip(&handle_, mps_data_model, settings);
+  CUOPT_LOG_INFO(
+    "first obj: %f last improvement of best feasible: %f last improvement after recombination: %f",
+    benchmark_info.objective_of_initial_population,
+    benchmark_info.last_improvement_of_best_feasible,
+    benchmark_info.last_improvement_after_recombination);
   // solution.write_to_sol_file(base_filename + ".sol", handle_.get_stream());
   std::chrono::milliseconds duration;
   auto end = std::chrono::high_resolution_clock::now();
@@ -199,8 +242,10 @@ int run_single_file(std::string file_path,
   std::stringstream ss;
   int decimal_places = 2;
   ss << std::fixed << std::setprecision(decimal_places) << base_filename << "," << sol_found << ","
-     << obj_val << "\n";
-  write_to_output_file(out_dir, base_filename, device, batch_id, ss.str());
+     << obj_val << "," << benchmark_info.objective_of_initial_population << ","
+     << benchmark_info.last_improvement_of_best_feasible << ","
+     << benchmark_info.last_improvement_after_recombination << "\n";
+  write_to_output_file(out_dir, base_filename, device, n_gpus, batch_id, ss.str());
   CUOPT_LOG_INFO("Results written to the file %s", base_filename.c_str());
   return sol_found;
 }
@@ -208,6 +253,7 @@ int run_single_file(std::string file_path,
 void run_single_file_mp(std::string file_path,
                         int device,
                         int batch_id,
+                        int n_gpus,
                         std::string out_dir,
                         std::optional<std::string> input_file_dir,
                         bool heuristics_only,
@@ -222,6 +268,7 @@ void run_single_file_mp(std::string file_path,
   int sol_found = run_single_file(file_path,
                                   device,
                                   batch_id,
+                                  n_gpus,
                                   out_dir,
                                   input_file_dir,
                                   heuristics_only,
@@ -254,7 +301,7 @@ void return_gpu_to_the_queue(std::unordered_map<pid_t, int>& pid_gpu_map,
 
 int main(int argc, char* argv[])
 {
-  argparse::ArgumentParser program("solve_mps_file");
+  argparse::ArgumentParser program("solve_MIP");
 
   // Define all arguments with appropriate defaults and help messages
   program.add_argument("--path").help("input path").required();
@@ -300,7 +347,16 @@ int main(int argc, char* argv[])
   program.add_argument("--time-limit")
     .help("time limit")
     .scan<'g', double>()
-    .default_value(std::numeric_limits<double>::max());
+    .default_value(std::numeric_limits<double>::infinity());
+
+  program.add_argument("--memory-limit")
+    .help("memory limit in MB")
+    .scan<'g', double>()
+    .default_value(0.0);
+
+  program.add_argument("--track-allocations")
+    .help("track allocations (t/f)")
+    .default_value(std::string("f"));
 
   // Parse arguments
   try {
@@ -322,12 +378,16 @@ int main(int argc, char* argv[])
 
   std::string out_dir;
   std::string result_file;
-  int batch_num;
+  int batch_num = -1;
 
-  bool heuristics_only = program.get<std::string>("--heuristics-only")[0] == 't';
-  int num_cpu_threads  = program.get<int>("--num-cpu-threads");
-  bool write_log_file  = program.get<std::string>("--write-log-file")[0] == 't';
-  bool log_to_console  = program.get<std::string>("--log-to-console")[0] == 't';
+  bool heuristics_only   = program.get<std::string>("--heuristics-only")[0] == 't';
+  int num_cpu_threads    = program.get<int>("--num-cpu-threads");
+  bool write_log_file    = program.get<std::string>("--write-log-file")[0] == 't';
+  bool log_to_console    = program.get<std::string>("--log-to-console")[0] == 't';
+  double memory_limit    = program.get<double>("--memory-limit");
+  bool track_allocations = program.get<std::string>("--track-allocations")[0] == 't';
+
+  if (num_cpu_threads < 0) { num_cpu_threads = omp_get_max_threads() / n_gpus; }
 
   if (program.is_used("--out-dir")) {
     out_dir     = program.get<std::string>("--out-dir");
@@ -354,8 +414,7 @@ int main(int argc, char* argv[])
     for (int i = 0; i < n_gpus; ++i) {
       gpu_queue.push(i);
     }
-    int tests_ran          = 0;
-    int n_instances_solved = 0;
+    int tests_ran = 0;
     std::vector<std::string> paths;
     if (run_selected) {
       for (const auto& instance : instances) {
@@ -383,11 +442,11 @@ int main(int argc, char* argv[])
 
     bool static_dispatch = false;
     if (static_dispatch) {
-      for (int i = 0; i < paths.size(); ++i) {
+      for (size_t i = 0; i < paths.size(); ++i) {
         // TODO implement
       }
     } else {
-      for (int i = 0; i < paths.size(); ++i) {
+      for (size_t i = 0; i < paths.size(); ++i) {
         task_queue.push(paths[i]);
       }
       while (!task_queue.empty()) {
@@ -407,6 +466,7 @@ int main(int argc, char* argv[])
             run_single_file_mp(file_name,
                                gpu_id,
                                batch_num,
+                               n_gpus,
                                out_dir,
                                initial_solution_file,
                                heuristics_only,
@@ -432,10 +492,21 @@ int main(int argc, char* argv[])
     merge_result_files(out_dir, result_file, n_gpus, batch_num);
   } else {
     auto memory_resource = make_async();
-    rmm::mr::set_current_device_resource(memory_resource.get());
+    if (memory_limit > 0) {
+      auto limiting_adaptor =
+        rmm::mr::limiting_resource_adaptor(memory_resource.get(), memory_limit * 1024ULL * 1024ULL);
+      rmm::mr::set_current_device_resource(&limiting_adaptor);
+    } else if (track_allocations) {
+      rmm::mr::tracking_resource_adaptor tracking_adaptor(memory_resource.get(),
+                                                          /*capture_stacks=*/true);
+      rmm::mr::set_current_device_resource(&tracking_adaptor);
+    } else {
+      rmm::mr::set_current_device_resource(memory_resource.get());
+    }
     run_single_file(path,
                     0,
                     0,
+                    n_gpus,
                     out_dir,
                     initial_solution_file,
                     heuristics_only,

@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+#include <cuda_runtime_api.h>
+
 #include "feasibility_jump_kernels.cuh"
 
 #include <cub/block/block_merge_sort.cuh>
@@ -137,7 +139,7 @@ __global__ void load_balancing_prepare_iteration(const __grid_constant__
 
     for (i_t i = blockIdx.x + range.first; i < range.second; i += gridDim.x) {
       i_t var_idx = fj.pb.related_variables[i];
-      update_jump_value<i_t, f_t, FJ_MTM_VIOLATED, false>(fj, var_idx);
+      update_jump_value<i_t, f_t, MTMMoveType::FJ_MTM_VIOLATED, false>(fj, var_idx);
     }
 
     if (FIRST_THREAD) *fj.load_balancing_skip = true;
@@ -320,8 +322,9 @@ __global__ void load_balancing_compute_scores_binary(
     if (threadIdx.x == 0) {
       cuopt_assert(fj.incumbent_assignment[var_idx] == 0 || fj.incumbent_assignment[var_idx] == 1,
                    "Current assignment is not binary!");
-      cuopt_assert(
-        fj.pb.variable_lower_bounds[var_idx] == 0 && fj.pb.variable_upper_bounds[var_idx] == 1, "");
+      cuopt_assert(get_lower(fj.pb.variable_bounds[var_idx]) == 0 &&
+                     get_upper(fj.pb.variable_bounds[var_idx]) == 1,
+                   "");
       cuopt_assert(
         fj.pb.check_variable_within_bounds(var_idx, fj.incumbent_assignment[var_idx] + delta),
         "Var not within bounds!");
@@ -380,8 +383,7 @@ __global__ void load_balancing_mtm_compute_candidates(
   i_t lane_id = threadIdx.x % raft::WarpSize;
 
   const i_t stride = get_warp_id_stride();
-  for (auto [var_idx, subworkid, offset_begin, offset_end, csr_offset, skip] :
-       csr_load_balancer<i_t, f_t>{
+  for (auto [var_idx, subworkid, offset_begin, offset_end, _, skip] : csr_load_balancer<i_t, f_t>{
          fj, fj.row_size_nonbin_prefix_sum, fj.work_id_to_nonbin_var_idx}) {
     cuopt_assert(!fj.pb.is_binary_variable[var_idx], "variable is binary");
 
@@ -399,8 +401,9 @@ __global__ void load_balancing_mtm_compute_candidates(
     auto rcp_cstr_coeff = fj.cstr_coeff_reciprocal[csr_offset];
     f_t c_lb            = fj.constraint_lower_bounds_csr[csr_offset];
     f_t c_ub            = fj.constraint_upper_bounds_csr[csr_offset];
-    f_t v_lb            = fj.pb.variable_lower_bounds[var_idx];
-    f_t v_ub            = fj.pb.variable_upper_bounds[var_idx];
+    auto v_bnd          = fj.pb.variable_bounds[var_idx];
+    f_t v_lb            = get_lower(v_bnd);
+    f_t v_ub            = get_upper(v_bnd);
 
     cuopt_assert(c_lb == fj.pb.constraint_lower_bounds[cstr_idx], "");
     cuopt_assert(c_ub == fj.pb.constraint_upper_bounds[cstr_idx], "");
@@ -483,8 +486,7 @@ __launch_bounds__(TPB_loadbalance, 16) __global__
   i_t lane_id = threadIdx.x % raft::WarpSize;
 
   const i_t stride = get_warp_id_stride();
-  for (auto [var_idx, subworkid, offset_begin, offset_end, csr_offset, skip] :
-       csr_load_balancer<i_t, f_t>{
+  for (auto [var_idx, subworkid, offset_begin, offset_end, _, skip] : csr_load_balancer<i_t, f_t>{
          fj, fj.row_size_nonbin_prefix_sum, fj.work_id_to_nonbin_var_idx}) {
     cuopt_assert(!fj.pb.is_binary_variable[var_idx], "variable is binary");
 
@@ -512,8 +514,9 @@ __launch_bounds__(TPB_loadbalance, 16) __global__
       cuopt_assert(cstr_idx >= 0 && cstr_idx < fj.pb.n_constraints, "");
     }
 
-    f_t v_lb = fj.pb.variable_lower_bounds[var_idx];
-    f_t v_ub = fj.pb.variable_upper_bounds[var_idx];
+    auto v_bnd = fj.pb.variable_bounds[var_idx];
+    f_t v_lb   = get_lower(v_bnd);
+    f_t v_ub   = get_upper(v_bnd);
 
     // candidate counts is usually very small (<4) thanks to early duplicate deletion in the
     // previous kernel rarely limits the thoroughput nor leads to noticeable imbalance
@@ -581,7 +584,8 @@ __launch_bounds__(TPB_loadbalance, 16) __global__
             // value
             if (!fj.move_numerically_stable(fj.incumbent_assignment[var_idx],
                                             fj.incumbent_assignment[var_idx] + delta,
-                                            base_feas)) {
+                                            base_feas,
+                                            *fj.violation_score)) {
               fj.jump_move_scores[var_idx] = fj_t<i_t, f_t>::move_score_t::invalid();
             } else if (fj.jump_move_scores[var_idx] < candidate.score
                        // determinism for ease of debugging

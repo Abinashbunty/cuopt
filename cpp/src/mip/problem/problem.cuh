@@ -20,16 +20,19 @@
 // THIS IS LIKELY THE INNER-MOST INCLUDE
 // FOR COMPILE TIME, WE SHOULD KEEP THE INCLUDES ON THIS HEADER MINIMAL
 
+#include "host_helper.cuh"
 #include "presolve_data.cuh"
+
+#include <mip/logger.hpp>
+#include <mip/relaxed_lp/lp_state.cuh>
 
 #include <cuopt/linear_programming/mip/solver_settings.hpp>
 #include <cuopt/linear_programming/optimization_problem.hpp>
 #include <cuopt/linear_programming/utilities/internals.hpp>
 #include "host_helper.cuh"
+#include "problem_fixing.cuh"
 
 #include <utilities/macros.cuh>
-
-#include <mip/logger.hpp>
 
 #include <raft/core/nvtx.hpp>
 #include <raft/random/rng_device.cuh>
@@ -54,7 +57,8 @@ constexpr bool USE_REL_TOLERANCE   = true;
 template <typename i_t, typename f_t>
 class problem_t {
  public:
-  problem_t(const optimization_problem_t<i_t, f_t>& problem);
+  problem_t(const optimization_problem_t<i_t, f_t>& problem,
+            const typename mip_solver_settings_t<i_t, f_t>::tolerances_t tolerances_ = {});
   problem_t() = delete;
   // copy constructor
   problem_t(const problem_t<i_t, f_t>& problem);
@@ -87,80 +91,95 @@ class problem_t {
 
   void insert_variables(variables_delta_t<i_t, f_t>& h_vars);
   void insert_constraints(constraints_delta_t<i_t, f_t>& h_constraints);
+  void set_implied_integers(const std::vector<i_t>& implied_integer_indices);
   void resize_variables(size_t size);
   void resize_constraints(size_t matrix_size, size_t constraint_size, size_t var_size);
   void preprocess_problem();
   bool pre_process_assignment(rmm::device_uvector<f_t>& assignment);
-  void post_process_assignment(rmm::device_uvector<f_t>& current_assignment);
+  void post_process_assignment(rmm::device_uvector<f_t>& current_assignment,
+                               bool resize_to_original_problem = true);
   void post_process_solution(solution_t<i_t, f_t>& solution);
   void compute_transpose_of_problem();
-  f_t get_user_obj_from_solver_obj(f_t solver_obj);
-
+  f_t get_user_obj_from_solver_obj(f_t solver_obj) const;
+  bool is_objective_integral() const { return objective_is_integral; }
+  void compute_integer_fixed_problem();
+  void fill_integer_fixed_problem(rmm::device_uvector<f_t>& assignment,
+                                  const raft::handle_t* handle_ptr);
+  void copy_rhs_from_problem(const raft::handle_t* handle_ptr);
+  rmm::device_uvector<f_t> get_fixed_assignment_from_integer_fixed_problem(
+    const rmm::device_uvector<f_t>& assignment);
   bool is_integer(f_t val) const;
   bool integer_equal(f_t val1, f_t val2) const;
 
   void get_host_user_problem(
     cuopt::linear_programming::dual_simplex::user_problem_t<i_t, f_t>& user_problem) const;
 
-  void write_as_mps(const std::string& path);
+  void add_cutting_plane_at_objective(f_t objective);
+  void compute_vars_with_objective_coeffs();
+  void test_problem_fixing_time();
+
+  enum var_flags_t : i_t {
+    VAR_IMPLIED_INTEGER = 1 << 0,
+  };
 
   struct view_t {
-    DI std::pair<i_t, i_t> reverse_range_for_var(i_t v) const
+    HDI std::pair<i_t, i_t> reverse_range_for_var(i_t v) const
     {
       cuopt_assert(v >= 0 && v < n_variables, "Variable should be within the range");
       return std::make_pair(reverse_offsets[v], reverse_offsets[v + 1]);
     }
 
-    DI std::pair<i_t, i_t> range_for_constraint(i_t c) const
+    HDI std::pair<i_t, i_t> range_for_constraint(i_t c) const
     {
       return std::make_pair(offsets[c], offsets[c + 1]);
     }
 
-    DI std::pair<i_t, i_t> range_for_related_vars(i_t v) const
+    HDI std::pair<i_t, i_t> range_for_related_vars(i_t v) const
     {
       return std::make_pair(related_variables_offsets[v], related_variables_offsets[v + 1]);
     }
 
-    DI bool check_variable_within_bounds(i_t v, f_t val) const
+    HDI bool check_variable_within_bounds(i_t v, f_t val) const
     {
       const f_t int_tol = tolerances.integrality_tolerance;
+      auto bounds       = variable_bounds[v];
       bool within_bounds =
-        val <= (variable_upper_bounds[v] + int_tol) && val >= (variable_lower_bounds[v] - int_tol);
+        val <= (get_upper(bounds) + int_tol) && val >= (get_lower(bounds) - int_tol);
       return within_bounds;
     }
 
-    DI bool is_integer_var(i_t v) const { return var_t::INTEGER == variable_types[v]; }
+    HDI bool is_integer_var(i_t v) const { return var_t::INTEGER == variable_types[v]; }
 
     // check if the variable is integer according to the tolerances
     // specified for this problem
-    DI bool is_integer(f_t val) const
+    HDI bool is_integer(f_t val) const
     {
       return raft::abs(round(val) - (val)) <= tolerances.integrality_tolerance;
     }
-    DI bool integer_equal(f_t val1, f_t val2) const
+    HDI bool integer_equal(f_t val1, f_t val2) const
     {
       return raft::abs(val1 - val2) <= tolerances.integrality_tolerance;
     }
 
-    DI f_t get_random_for_var(i_t v, raft::random::PCGenerator& rng) const
+    HDI f_t get_random_for_var(i_t v, raft::random::PCGenerator& rng) const
     {
       cuopt_assert(var_t::INTEGER != variable_types[v],
                    "Random value can only be called on continuous values");
-      f_t lower_bound = variable_lower_bounds[v];
-      f_t upper_bound = variable_upper_bounds[v];
+      auto bounds = variable_bounds[v];
 
       f_t val;
-      if (isfinite(lower_bound) && isfinite(upper_bound)) {
-        f_t diff = upper_bound - lower_bound;
-        val      = diff * rng.next_float() + lower_bound;
+      if (isfinite(get_lower(bounds)) && isfinite(get_upper(bounds))) {
+        f_t diff = get_upper(bounds) - get_lower(bounds);
+        val      = diff * rng.next_float() + get_lower(bounds);
       } else {
-        auto finite_bound = isfinite(lower_bound) ? lower_bound : upper_bound;
+        auto finite_bound = isfinite(get_lower(bounds)) ? get_lower(bounds) : get_upper(bounds);
         val               = finite_bound;
       }
-      cuopt_assert(isfinite(lower_bound), "Value must be finite");
+      cuopt_assert(isfinite(get_lower(bounds)), "Value must be finite");
       return val;
     }
 
+    using f_t2 = typename type_2<f_t>::type;
     typename mip_solver_settings_t<i_t, f_t>::tolerances_t tolerances;
     i_t n_variables;
     i_t n_integer_vars;
@@ -175,12 +194,12 @@ class problem_t {
     raft::device_span<i_t> variables;
     raft::device_span<i_t> offsets;
     raft::device_span<f_t> objective_coefficients;
-    raft::device_span<f_t> variable_lower_bounds;
-    raft::device_span<f_t> variable_upper_bounds;
+    raft::device_span<f_t2> variable_bounds;
     raft::device_span<f_t> constraint_lower_bounds;
     raft::device_span<f_t> constraint_upper_bounds;
     raft::device_span<var_t> variable_types;
     raft::device_span<i_t> is_binary_variable;
+    raft::device_span<i_t> var_flags;
     raft::device_span<i_t> integer_indices;
     raft::device_span<i_t> binary_indices;
     raft::device_span<i_t> nonbinary_indices;
@@ -194,6 +213,8 @@ class problem_t {
 
   const optimization_problem_t<i_t, f_t>* original_problem_ptr;
   const raft::handle_t* handle_ptr;
+  std::shared_ptr<problem_t<i_t, f_t>> integer_fixed_problem = nullptr;
+  rmm::device_uvector<i_t> integer_fixed_variable_map;
 
   std::function<void(const std::vector<f_t>&)> branch_and_bound_callback;
 
@@ -228,8 +249,8 @@ class problem_t {
 
   /** weights in the objective function */
   rmm::device_uvector<f_t> objective_coefficients;
-  rmm::device_uvector<f_t> variable_lower_bounds;
-  rmm::device_uvector<f_t> variable_upper_bounds;
+  using f_t2 = typename type_2<f_t>::type;
+  rmm::device_uvector<f_t2> variable_bounds;
   rmm::device_uvector<f_t> constraint_lower_bounds;
   rmm::device_uvector<f_t> constraint_upper_bounds;
   /* biggest between cstr lower and upper */
@@ -252,8 +273,20 @@ class problem_t {
   std::vector<std::string> row_names{};
   /** name of the objective (only a single objective is currently allowed) */
   std::string objective_name;
+  f_t objective_offset;
   bool is_scaled_{false};
   bool preprocess_called{false};
+  bool objective_is_integral{false};
+  // this LP state keeps the warm start data of some solution of
+  // 1. Original problem: it is unchanged and part of it is used
+  // to warm start slightly modified problems.
+  // 2. Integer fixed problem: this is useful as the problem structure
+  // is always the same and only the RHS changes. Using this helps in warm start.
+  lp_state_t<i_t, f_t> lp_state;
+  problem_fixing_helpers_t<i_t, f_t> fixing_helpers;
+  bool cutting_plane_added{false};
+  std::pair<std::vector<i_t>, std::vector<f_t>> vars_with_objective_coeffs;
+  bool expensive_to_fix_vars{false};
 };
 
 }  // namespace linear_programming::detail

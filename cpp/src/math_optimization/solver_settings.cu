@@ -16,8 +16,8 @@
  */
 
 #include <cuopt/linear_programming/solver_settings.hpp>
-#include <cuopt/logger.hpp>
 #include <mip/mip_constants.hpp>
+#include <utilities/logger.hpp>
 
 namespace cuopt::linear_programming {
 
@@ -79,18 +79,24 @@ solver_settings_t<i_t, f_t>::solver_settings_t() : pdlp_settings(), mip_settings
     {CUOPT_MIP_ABSOLUTE_TOLERANCE, &mip_settings.tolerances.absolute_tolerance, 0.0, 1e-1, 1e-4},
     {CUOPT_MIP_RELATIVE_TOLERANCE, &mip_settings.tolerances.relative_tolerance, 0.0, 1e-1, 1e-4},
     {CUOPT_MIP_INTEGRALITY_TOLERANCE, &mip_settings.tolerances.integrality_tolerance, 0.0, 1e-1, 1e-5},
-    {CUOPT_MIP_ABSOLUTE_GAP, &mip_settings.tolerances.absolute_mip_gap, 0.0, 1e-1, 1e-10},
+    {CUOPT_MIP_ABSOLUTE_GAP, &mip_settings.tolerances.absolute_mip_gap, 0.0, CUOPT_INFINITY, 1e-10},
     {CUOPT_MIP_RELATIVE_GAP, &mip_settings.tolerances.relative_mip_gap, 0.0, 1e-1, 1e-4},
     {CUOPT_PRIMAL_INFEASIBLE_TOLERANCE, &pdlp_settings.tolerances.primal_infeasible_tolerance, 0.0, 1e-1, 1e-8},
     {CUOPT_DUAL_INFEASIBLE_TOLERANCE, &pdlp_settings.tolerances.dual_infeasible_tolerance, 0.0, 1e-1, 1e-8}
    };
 
   // Int parameters
+  // TODO should we have Stable2 and Methodolical1 here?
   int_parameters = {
     {CUOPT_ITERATION_LIMIT, &pdlp_settings.iteration_limit, 0, std::numeric_limits<i_t>::max(), std::numeric_limits<i_t>::max()},
-    {CUOPT_PDLP_SOLVER_MODE, reinterpret_cast<int*>(&pdlp_settings.pdlp_solver_mode), CUOPT_PDLP_SOLVER_MODE_STABLE1, CUOPT_PDLP_SOLVER_MODE_FAST1, CUOPT_PDLP_SOLVER_MODE_STABLE2},
-    {CUOPT_METHOD, reinterpret_cast<int*>(&pdlp_settings.method), CUOPT_METHOD_CONCURRENT, CUOPT_METHOD_DUAL_SIMPLEX, CUOPT_METHOD_CONCURRENT},
-    {CUOPT_NUM_CPU_THREADS, &mip_settings.num_cpu_threads, -1, std::numeric_limits<i_t>::max(), -1}
+    {CUOPT_PDLP_SOLVER_MODE, reinterpret_cast<int*>(&pdlp_settings.pdlp_solver_mode), CUOPT_PDLP_SOLVER_MODE_STABLE1, CUOPT_PDLP_SOLVER_MODE_STABLE3, CUOPT_PDLP_SOLVER_MODE_STABLE3},
+    {CUOPT_METHOD, reinterpret_cast<int*>(&pdlp_settings.method), CUOPT_METHOD_CONCURRENT, CUOPT_METHOD_BARRIER, CUOPT_METHOD_CONCURRENT},
+    {CUOPT_NUM_CPU_THREADS, &mip_settings.num_cpu_threads, -1, std::numeric_limits<i_t>::max(), -1},
+    {CUOPT_AUGMENTED, &pdlp_settings.augmented, -1, 1, -1},
+    {CUOPT_FOLDING, &pdlp_settings.folding, -1, 1, -1},
+    {CUOPT_DUALIZE, &pdlp_settings.dualize, -1, 1, -1},
+    {CUOPT_ORDERING, &pdlp_settings.ordering, -1, 1, -1},
+    {CUOPT_BARRIER_DUAL_INITIAL_POINT, &pdlp_settings.barrier_dual_initial_point, -1, 1, -1}
   };
 
     // Bool parameters
@@ -104,7 +110,12 @@ solver_settings_t<i_t, f_t>::solver_settings_t() : pdlp_settings(), mip_settings
     {CUOPT_MIP_HEURISTICS_ONLY, &mip_settings.heuristics_only, false},
     {CUOPT_LOG_TO_CONSOLE, &pdlp_settings.log_to_console, true},
     {CUOPT_LOG_TO_CONSOLE, &mip_settings.log_to_console, true},
-    {CUOPT_CROSSOVER, &pdlp_settings.crossover, false}
+    {CUOPT_CROSSOVER, &pdlp_settings.crossover, false},
+    {CUOPT_ELIMINATE_DENSE_COLUMNS, &pdlp_settings.eliminate_dense_columns, true},
+    {CUOPT_CUDSS_DETERMINISTIC, &pdlp_settings.cudss_deterministic, false},
+    {CUOPT_PRESOLVE, &pdlp_settings.presolve, false},
+    {CUOPT_PRESOLVE, &mip_settings.presolve, true},
+    {CUOPT_DUAL_POSTSOLVE, &pdlp_settings.dual_postsolve, true}
   };
   // String parameters
   string_parameters = {
@@ -371,21 +382,17 @@ const rmm::device_uvector<f_t>& solver_settings_t<i_t, f_t>::get_initial_pdlp_du
 }
 
 template <typename i_t, typename f_t>
-void solver_settings_t<i_t, f_t>::set_initial_mip_solution(const f_t* solution, i_t size)
+void solver_settings_t<i_t, f_t>::add_initial_mip_solution(const f_t* solution,
+                                                           i_t size,
+                                                           rmm::cuda_stream_view stream)
 {
-  mip_settings.set_initial_solution(solution, size);
+  mip_settings.add_initial_solution(solution, size, stream);
 }
 
 template <typename i_t, typename f_t>
 void solver_settings_t<i_t, f_t>::set_mip_callback(internals::base_solution_callback_t* callback)
 {
   mip_settings.set_mip_callback(callback);
-}
-
-template <typename i_t, typename f_t>
-const rmm::device_uvector<f_t>& solver_settings_t<i_t, f_t>::get_initial_mip_solution() const
-{
-  return mip_settings.get_initial_solution();
 }
 
 template <typename i_t, typename f_t>

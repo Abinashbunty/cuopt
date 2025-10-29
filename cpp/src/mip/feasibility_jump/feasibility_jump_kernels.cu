@@ -26,30 +26,14 @@
 
 #include <cooperative_groups.h>
 
+#include "feasibility_jump_impl_common.cuh"
+
 namespace cg = cooperative_groups;
 
 #define CONSTRAINT_FLAG_INSERT 0
 #define CONSTRAINT_FLAG_REMOVE 1
 
 namespace cuopt::linear_programming::detail {
-
-template <typename i_t, typename f_t, typename Iterator>
-static DI f_t KahanBabushkaNeumaierSum(Iterator begin, Iterator end)
-{
-  f_t sum = 0;
-  f_t c   = 0;
-  for (Iterator it = begin; it != end; ++it) {
-    f_t delta = *it;
-    f_t t     = sum + delta;
-    if (fabs(sum) > fabs(delta)) {
-      c += (sum - t) + delta;
-    } else {
-      c += (delta - t) + sum;
-    }
-    sum = t;
-  }
-  return sum + c;
-}
 
 template <typename i_t, typename f_t>
 DI thrust::pair<f_t, f_t> move_objective_score(
@@ -74,97 +58,6 @@ DI thrust::pair<f_t, f_t> move_objective_score(
   }
 
   return {base_obj, bonus_breakthrough};
-}
-
-template <typename i_t, typename f_t>
-DI std::pair<f_t, f_t> feas_score_constraint(
-  const typename fj_t<i_t, f_t>::climber_data_t::view_t& fj,
-  i_t var_idx,
-  f_t delta,
-  i_t cstr_idx,
-  f_t cstr_coeff,
-  f_t c_lb,
-  f_t c_ub,
-  f_t current_lhs)
-{
-  cuopt_assert(isfinite(delta), "invalid delta");
-  cuopt_assert(cstr_coeff != 0 && isfinite(cstr_coeff), "invalid coefficient");
-
-  f_t base_feas    = 0;
-  f_t bonus_robust = 0;
-
-  f_t bounds[2] = {c_lb, c_ub};
-  cuopt_assert(isfinite(c_lb) || isfinite(c_ub), "no range");
-  for (i_t bound_idx = 0; bound_idx < 2; ++bound_idx) {
-    if (!isfinite(bounds[bound_idx])) continue;
-
-    // factor to correct the lhs/rhs to turn a lb <= lhs <= ub constraint into
-    // two virtual leq constraints "lhs <= ub" and "-lhs <= -lb" in order to match
-    // the convention of the paper
-
-    // TODO: broadcast left/right weights to a csr_offset-indexed table? local minimums
-    // usually occur on a rarer basis (around 50 iteratiosn to 1 local minimum)
-    // likely unreasonable and overkill however
-    f_t cstr_weight =
-      bound_idx == 0 ? fj.cstr_left_weights[cstr_idx] : fj.cstr_right_weights[cstr_idx];
-    f_t sign      = bound_idx == 0 ? -1 : 1;
-    f_t rhs       = bounds[bound_idx] * sign;
-    f_t old_lhs   = current_lhs * sign;
-    f_t new_lhs   = (current_lhs + cstr_coeff * delta) * sign;
-    f_t old_slack = rhs - old_lhs;
-    f_t new_slack = rhs - new_lhs;
-
-    cuopt_assert(isfinite(cstr_weight), "invalid weight");
-    cuopt_assert(isfinite(old_lhs), "");
-    cuopt_assert(isfinite(new_lhs), "");
-    cuopt_assert(isfinite(old_slack) && isfinite(new_slack), "");
-
-    f_t cstr_tolerance = fj.get_corrected_tolerance(cstr_idx);
-
-    bool old_viol = fj.excess_score(cstr_idx, current_lhs) < -cstr_tolerance;
-    bool new_viol = fj.excess_score(cstr_idx, current_lhs + cstr_coeff * delta) < -cstr_tolerance;
-
-    bool old_sat = old_lhs < rhs + cstr_tolerance;
-    bool new_sat = new_lhs < rhs + cstr_tolerance;
-
-    // equality
-    if (fj.pb.integer_equal(c_lb, c_ub)) {
-      if (!old_viol) cuopt_assert(old_sat == !old_viol, "");
-      if (!new_viol) cuopt_assert(new_sat == !new_viol, "");
-    }
-
-    // if it would feasibilize this constraint
-    if (!old_sat && new_sat) {
-      cuopt_assert(old_viol, "");
-      base_feas += cstr_weight;
-    }
-    // would cause this constraint to be violated
-    else if (old_sat && !new_sat) {
-      cuopt_assert(new_viol, "");
-      base_feas -= cstr_weight;
-    }
-    // simple improvement
-    else if (!old_sat && !new_sat && old_lhs > new_lhs) {
-      cuopt_assert(old_viol && new_viol, "");
-      base_feas += (i_t)(cstr_weight * fj.settings->parameters.excess_improvement_weight);
-    }
-    // simple worsening
-    else if (!old_sat && !new_sat && old_lhs <= new_lhs) {
-      cuopt_assert(old_viol && new_viol, "");
-      base_feas -= (i_t)(cstr_weight * fj.settings->parameters.excess_improvement_weight);
-    }
-
-    // robustness score bonus if this would leave some strick slack
-    bool old_stable = old_lhs < rhs - cstr_tolerance;
-    bool new_stable = new_lhs < rhs - cstr_tolerance;
-    if (!old_stable && new_stable) {
-      bonus_robust += cstr_weight;
-    } else if (old_stable && !new_stable) {
-      bonus_robust -= cstr_weight;
-    }
-  }
-
-  return {base_feas, bonus_robust};
 }
 
 template <typename i_t, typename f_t>
@@ -202,9 +95,11 @@ DI void update_weights(typename fj_t<i_t, f_t>::climber_data_t::view_t& fj)
   for (i_t i = blockIdx.x; i < fj.violated_constraints.size(); i += gridDim.x) {
     i_t cstr_idx           = fj.violated_constraints.contents[i];
     f_t curr_incumbent_lhs = fj.incumbent_lhs[cstr_idx];
-    f_t curr_lower_excess  = fj.lower_excess_score(cstr_idx, curr_incumbent_lhs);
-    f_t curr_upper_excess  = fj.upper_excess_score(cstr_idx, curr_incumbent_lhs);
-    f_t curr_excess_score  = curr_lower_excess + curr_upper_excess;
+    f_t curr_lower_excess =
+      fj.lower_excess_score(cstr_idx, curr_incumbent_lhs, fj.pb.constraint_lower_bounds[cstr_idx]);
+    f_t curr_upper_excess =
+      fj.upper_excess_score(cstr_idx, curr_incumbent_lhs, fj.pb.constraint_upper_bounds[cstr_idx]);
+    f_t curr_excess_score = curr_lower_excess + curr_upper_excess;
 
     f_t old_weight;
     if (curr_lower_excess < 0.) {
@@ -263,7 +158,7 @@ __global__ void init_lhs_and_violation(typename fj_t<i_t, f_t>::climber_data_t::
         return fj.pb.coefficients[j] * fj.incumbent_assignment[fj.pb.variables[j]];
       });
     fj.incumbent_lhs[cstr_idx] =
-      KahanBabushkaNeumaierSum<i_t, f_t>(delta_it + offset_begin, delta_it + offset_end);
+      fj_kahan_babushka_neumaier_sum<i_t, f_t>(delta_it + offset_begin, delta_it + offset_end);
     fj.incumbent_lhs_sumcomp[cstr_idx] = 0;
 
     f_t th_violation       = fj.excess_score(cstr_idx, fj.incumbent_lhs[cstr_idx]);
@@ -339,7 +234,16 @@ DI typename fj_t<i_t, f_t>::move_score_info_t compute_new_score(
 
   typename fj_t<i_t, f_t>::move_score_info_t score_info;
 
-  score_info.score.base    = round(base_obj + base_feas_sum);
+  // Add a large bonus if this move would turn a fractional variable integral
+  // in rounding mode
+  f_t integrality_multiplier = 1;
+  if (fj.settings->mode == fj_mode_t::ROUNDING) {
+    if (fj.pb.is_integer_var(var_idx) && !fj.pb.is_integer(fj.incumbent_assignment[var_idx]) &&
+        fj.pb.is_integer(fj.incumbent_assignment[var_idx] + delta)) {
+      integrality_multiplier = fj.settings->parameters.fractional_score_multiplier;
+    }
+  }
+  score_info.score.base    = round(base_obj + base_feas_sum) * integrality_multiplier;
   score_info.score.bonus   = round(bonus_breakthrough + bonus_robust_sum);
   score_info.infeasibility = base_feas_sum;
 
@@ -352,50 +256,6 @@ DI typename fj_t<i_t, f_t>::move_score_info_t compute_new_score(
   return score_info;
 }
 
-template <typename i_t, typename f_t, MTMMoveType move_type>
-DI thrust::tuple<f_t, f_t, f_t, f_t> get_mtm_for_constraint(
-  const typename fj_t<i_t, f_t>::climber_data_t::view_t& fj,
-  i_t var_idx,
-  i_t cstr_idx,
-  f_t cstr_coeff)
-{
-  f_t sign     = -1;
-  f_t delta_ij = 0;
-  f_t slack    = 0;
-
-  f_t c_lb           = fj.pb.constraint_lower_bounds[cstr_idx];
-  f_t c_ub           = fj.pb.constraint_upper_bounds[cstr_idx];
-  f_t cstr_tolerance = fj.get_corrected_tolerance(cstr_idx);
-
-  f_t old_val = fj.incumbent_assignment[var_idx];
-
-  // process each bound as two separate constraints
-  f_t bounds[2] = {c_lb, c_ub};
-  cuopt_assert(isfinite(bounds[0]) || isfinite(bounds[1]), "");
-
-  for (i_t bound_idx = 0; bound_idx < 2; ++bound_idx) {
-    if (!isfinite(bounds[bound_idx])) continue;
-
-    // factor to correct the lhs/rhs to turn a lb <= lhs <= ub constraint into
-    // two virtual constraints lhs <= ub and -lhs <= -lb
-    sign    = bound_idx == 0 ? -1 : 1;
-    f_t lhs = fj.incumbent_lhs[cstr_idx] * sign;
-    f_t rhs = bounds[bound_idx] * sign;
-    slack   = rhs - lhs;
-
-    // skip constraints that are violated/satisfied based on the MTM move type
-    bool violated = slack < -cstr_tolerance;
-    if (move_type == MTMMoveType::FJ_MTM_VIOLATED ? !violated : violated) continue;
-
-    f_t new_val = old_val;
-
-    delta_ij = slack / (cstr_coeff * sign);
-    break;
-  }
-
-  return {delta_ij, sign, slack, cstr_tolerance};
-}
-
 // find best mixed tight move
 template <typename i_t, typename f_t, i_t TPB, MTMMoveType move_type>
 DI std::pair<f_t, typename fj_t<i_t, f_t>::move_score_info_t> compute_best_mtm(
@@ -405,16 +265,15 @@ DI std::pair<f_t, typename fj_t<i_t, f_t>::move_score_info_t> compute_best_mtm(
   auto best_score_info = fj_t<i_t, f_t>::move_score_info_t::invalid();
 
   // fixed variables
-  if (fj.pb.integer_equal(fj.pb.variable_lower_bounds[var_idx],
-                          fj.pb.variable_upper_bounds[var_idx])) {
-    return std::make_pair(fj.pb.variable_lower_bounds[var_idx],
-                          fj_t<i_t, f_t>::move_score_info_t::invalid());
+  auto bounds = fj.pb.variable_bounds[var_idx];
+  if (fj.pb.integer_equal(get_lower(bounds), get_upper(bounds))) {
+    return std::make_pair(get_lower(bounds), fj_t<i_t, f_t>::move_score_info_t::invalid());
   }
 
   f_t old_val   = fj.incumbent_assignment[var_idx];
   f_t obj_coeff = fj.pb.objective_coefficients[var_idx];
-  f_t v_lb      = fj.pb.variable_lower_bounds[var_idx];
-  f_t v_ub      = fj.pb.variable_upper_bounds[var_idx];
+  f_t v_lb      = get_lower(bounds);
+  f_t v_ub      = get_upper(bounds);
   raft::random::PCGenerator rng(fj.settings->seed + *fj.iterations, 0, 0);
   cuopt_assert(isfinite(v_lb) || isfinite(v_ub), "unexpected free variable");
 
@@ -435,11 +294,16 @@ DI std::pair<f_t, typename fj_t<i_t, f_t>::move_score_info_t> compute_best_mtm(
       // reservoir sampling to get 20 random constraints
       f_t selection_probability = min(1.0, 20.0 / (offset_end - offset_begin));
       if (rng.next_double() > selection_probability) continue;
+    } else if constexpr (move_type == MTMMoveType::FJ_MTM_ALL) {
+      // sample all constraints, regardless of violation status
+      ;
     }
 
+    f_t c_lb = fj.pb.constraint_lower_bounds[cstr_idx];
+    f_t c_ub = fj.pb.constraint_upper_bounds[cstr_idx];
     f_t new_val;
     auto [delta_ij, sign, slack, cstr_tolerance] =
-      get_mtm_for_constraint<i_t, f_t, move_type>(fj, var_idx, cstr_idx, cstr_coeff);
+      get_mtm_for_constraint<i_t, f_t, move_type>(fj, var_idx, cstr_idx, cstr_coeff, c_lb, c_ub);
     if (fj.pb.is_integer_var(var_idx)) {
       new_val = cstr_coeff * sign > 0
                   ? floor(old_val + delta_ij + fj.pb.tolerances.integrality_tolerance)
@@ -457,6 +321,8 @@ DI std::pair<f_t, typename fj_t<i_t, f_t>::move_score_info_t> compute_best_mtm(
       }
     }
 
+    if (fj.pb.is_integer_var(var_idx)) new_val = round(new_val);
+
     if (fj.pb.integer_equal(new_val, old_val) || !isfinite(new_val)) continue;
 
     if (threadIdx.x == 0) {
@@ -467,7 +333,8 @@ DI std::pair<f_t, typename fj_t<i_t, f_t>::move_score_info_t> compute_best_mtm(
     auto new_score_info = compute_new_score<i_t, f_t, TPB>(fj, var_idx, new_val - old_val);
     if (threadIdx.x == 0) {
       // reject this move if it would increase the target variable to a numerically unstable value
-      if (fj.move_numerically_stable(old_val, new_val, new_score_info.infeasibility)) {
+      if (fj.move_numerically_stable(
+            old_val, new_val, new_score_info.infeasibility, *fj.violation_score)) {
         if (new_score_info.score > best_score_info.score ||
             (new_score_info.score == best_score_info.score && new_val < best_val)) {
           best_score_info = new_score_info;
@@ -506,13 +373,14 @@ DI void update_jump_value(typename fj_t<i_t, f_t>::climber_data_t::view_t fj, i_
   auto best_score_info = fj_t<i_t, f_t>::move_score_info_t::invalid();
   if constexpr (!is_binary_pb) {
     if (fj.pb.is_binary_variable[var_idx] && fj.pb.is_integer(fj.incumbent_assignment[var_idx])) {
-      delta = 1.0 - 2 * fj.incumbent_assignment[var_idx];
+      delta = round(1.0 - 2 * fj.incumbent_assignment[var_idx]);
       if (threadIdx.x == 0) {
-        cuopt_assert(fj.incumbent_assignment[var_idx] == 0 || fj.incumbent_assignment[var_idx] == 1,
+        cuopt_assert(fj.pb.integer_equal(fj.incumbent_assignment[var_idx], 0) ||
+                       fj.pb.integer_equal(fj.incumbent_assignment[var_idx], 1),
                      "Current assignment is not binary!");
-        cuopt_assert(
-          fj.pb.variable_lower_bounds[var_idx] == 0 && fj.pb.variable_upper_bounds[var_idx] == 1,
-          "");
+        cuopt_assert(get_lower(fj.pb.variable_bounds[var_idx]) == 0 &&
+                       get_upper(fj.pb.variable_bounds[var_idx]) == 1,
+                     "");
         cuopt_assert(
           fj.pb.check_variable_within_bounds(var_idx, fj.incumbent_assignment[var_idx] + delta),
           "Var not within bounds!");
@@ -525,10 +393,11 @@ DI void update_jump_value(typename fj_t<i_t, f_t>::climber_data_t::view_t fj, i_
       best_score_info = score_info;
     }
   } else {
-    delta = 1.0 - 2 * fj.incumbent_assignment[var_idx];
+    delta = round(1.0 - 2 * fj.incumbent_assignment[var_idx]);
     if (threadIdx.x == 0) {
-      cuopt_assert(
-        fj.pb.variable_lower_bounds[var_idx] == 0 && fj.pb.variable_upper_bounds[var_idx] == 1, "");
+      cuopt_assert(get_lower(fj.pb.variable_bounds[var_idx]) == 0 &&
+                     get_upper(fj.pb.variable_bounds[var_idx]) == 1,
+                   "");
       cuopt_assert(
         fj.pb.check_variable_within_bounds(var_idx, fj.incumbent_assignment[var_idx] + delta),
         "Var not within bounds!");
@@ -571,7 +440,8 @@ DI bool check_feasibility(const typename fj_t<i_t, f_t>::climber_data_t::view_t&
         return fj.pb.coefficients[j] * fj.incumbent_assignment[fj.pb.variables[j]];
       });
 
-    f_t lhs = KahanBabushkaNeumaierSum<i_t, f_t>(delta_it + offset_begin, delta_it + offset_end);
+    f_t lhs =
+      fj_kahan_babushka_neumaier_sum<i_t, f_t>(delta_it + offset_begin, delta_it + offset_end);
     cuopt_assert(fj.cstr_satisfied(cIdx, lhs), "constraint violated");
   }
   cuopt_func_call((check_variable_feasibility<i_t, f_t>(fj, check_integer)));
@@ -580,33 +450,22 @@ DI bool check_feasibility(const typename fj_t<i_t, f_t>::climber_data_t::view_t&
 }
 
 template <typename i_t, typename f_t>
-DI void save_best_l1_distance_solution(typename fj_t<i_t, f_t>::climber_data_t::view_t& fj)
-{
-  __shared__ f_t shmem[raft::WarpSize];
-  __shared__ f_t res;
-  // compute l1 distance on integer indices
-  compute_l1_distance_block<i_t, f_t>(
-    fj.incumbent_assignment, fj.farthest_l1_sol, fj.pb.integer_indices, shmem, res);
-  __syncthreads();
-  if (res > *fj.best_l1_distance) {
-    __syncthreads();
-    *fj.best_l1_distance = res;
-    for (i_t i = threadIdx.x; i < fj.pb.n_variables; i += blockDim.x) {
-      fj.farthest_l1_sol[i] = fj.incumbent_assignment[i];
-    }
-  }
-}
-
-template <typename i_t, typename f_t>
 DI bool save_best_solution(typename fj_t<i_t, f_t>::climber_data_t::view_t& fj)
 {
   cuopt_assert(blockIdx.x == 0, "Only a single block can run!");
   __shared__ bool save_sol;
-  if (fj.settings->keep_farthest_l1_sol) { save_best_l1_distance_solution<i_t, f_t>(fj); }
+  __shared__ bool improving;
+  const double improvement_threshold = max(1e-4, abs(*fj.incumbent_objective * 1e-4));
 
   if (FIRST_THREAD) {
     bool better_objective = *fj.incumbent_objective < *fj.saved_solution_objective;
     save_sol              = better_objective && fj.violated_constraints.size() == 0;
+    // if we're in rounding mode, save everytime we reduce the number of fractionals
+    if (fj.settings->mode == fj_mode_t::ROUNDING &&
+        fj.fractional_variables.size() < *fj.saved_best_fractional_count) {
+      save_sol                        = true;
+      *fj.saved_best_fractional_count = fj.fractional_variables.size();
+    }
     // save least infeasible solution
     if (*fj.best_excess < 0 && *fj.violation_score > *fj.best_excess) {
       if (fj.violated_constraints.size() == 0)
@@ -614,6 +473,12 @@ DI bool save_best_solution(typename fj_t<i_t, f_t>::climber_data_t::view_t& fj)
       else
         *fj.best_excess = *fj.violation_score;
       save_sol = true;
+    }
+
+    if (!fj.settings->feasibility_run) {
+      improving = *fj.saved_solution_objective - *fj.incumbent_objective > improvement_threshold;
+    } else {
+      improving = save_sol;
     }
   }
 
@@ -640,10 +505,11 @@ DI bool save_best_solution(typename fj_t<i_t, f_t>::climber_data_t::view_t& fj)
     cuopt_assert(
       *fj.weighted_violation_score <= *fj.max_cstr_weight * fj.pb.tolerances.absolute_tolerance,
       "Violated constraint and score mismatch");
-    cuopt_func_call((check_feasibility<i_t, f_t>(fj)));
+    bool check_integer = fj.settings->mode != fj_mode_t::ROUNDING;
+    cuopt_func_call((check_feasibility<i_t, f_t>(fj, check_integer)));
   }
   // return whether it is an improving local minimum
-  return save_sol;
+  return improving;
 }
 
 template <typename i_t, typename f_t>
@@ -661,6 +527,12 @@ DI void check_exit_condition(typename fj_t<i_t, f_t>::climber_data_t::view_t& vi
     bool is_feasible = view.settings->feasibility_run && view.violated_constraints.size() == 0;
     // bool max_weight_reached = *view.max_cstr_weight > view.stop_threshold;
     if (local_min_cond || is_feasible) { *view.temp_break_condition = 1; }
+  }
+  // if we're in rounding mode and in the "round remaining fractionals" phase,
+  // exit when there are no fractionals left
+  else if (view.settings->mode == fj_mode_t::ROUNDING && *view.handle_fractionals_only &&
+           view.fractional_variables.size() == 0) {
+    *view.temp_break_condition = 1;
   }
 }
 
@@ -733,17 +605,42 @@ __global__ void update_assignment_kernel(typename fj_t<i_t, f_t>::climber_data_t
     cuopt_assert(isfinite(new_val), "assignment is not finite");
 
     if (fj.pb.is_integer_var(var_idx)) {
-      cuopt_assert(fj.pb.is_integer(new_val), "The variable must be integer");
-      new_val = round(new_val);
+      // Never "un-round" an integer variable
+      if (fj.pb.is_integer(fj.incumbent_assignment[var_idx])) {
+        cuopt_assert(fj.pb.is_integer(new_val), "The variable must be integer");
+      }
+
+      if (fj.settings->mode == fj_mode_t::ROUNDING &&
+          !fj.pb.is_integer(fj.incumbent_assignment[var_idx]) && fj.pb.is_integer(new_val)) {
+        fj.fractional_variables.remove(var_idx);
+
+        DEVICE_LOG_TRACE(
+          "[*][*] rounding %d from %g to %g%s, remaining %d\n",
+          var_idx,
+          fj.incumbent_assignment[var_idx],
+          new_val,
+          (new_val != round(fj.incumbent_assignment[var_idx]) ? " (non-trivial)" : " "),
+          fj.fractional_variables.size());
+        cuopt_assert(fj.fractional_variables.size() >= 0,
+                     "remaining fractional var count is unexpectedly negative");
+      }
     }
 
-#if defined(FJ_SINGLE_STEP)
-    DEVICE_LOG_TRACE(
-      "=---- FJ: updated %d [%g/%g] :%.4g+{%.4g}=%.4g score {%g,%g}, d_obj %.2g+%.2g=%.2g, "
-      "infeas %.2g, total viol %d\n",
+    auto bounds          = fj.pb.variable_bounds[var_idx];
+    i_t var_range        = get_upper(bounds) - get_lower(bounds);
+    double delta_rel_err = fabs(fj.jump_move_delta[var_idx]) / var_range;
+    if (delta_rel_err < fj.settings->parameters.small_move_tabu_threshold) {
+      *fj.small_move_tabu = *fj.iterations;
+    }
+
+#if FJ_SINGLE_STEP
+    DEVICE_LOG_DEBUG(
+      "=---- FJ[%d]: updated %d [%g/%g] :%.4g+{%.4g}=%.4g score {%g,%g}, d_obj %.2g+%.2g=%.2g, "
+      "err_range %.2g%%, infeas %.2g, total viol %d\n",
+      *fj.iterations,
       var_idx,
-      fj.pb.variable_lower_bounds[var_idx],
-      fj.pb.variable_upper_bounds[var_idx],
+      get_lower(fj.pb.variable_bounds[var_idx]),
+      get_upper(fj.pb.variable_bounds[var_idx]),
       fj.incumbent_assignment[var_idx],
       fj.jump_move_delta[var_idx],
       fj.incumbent_assignment[var_idx] + fj.jump_move_delta[var_idx],
@@ -752,6 +649,7 @@ __global__ void update_assignment_kernel(typename fj_t<i_t, f_t>::climber_data_t
       *fj.incumbent_objective,
       fj.jump_move_delta[var_idx] * fj.pb.objective_coefficients[var_idx],
       *fj.incumbent_objective + fj.jump_move_delta[var_idx] * fj.pb.objective_coefficients[var_idx],
+      delta_rel_err,
       fj.jump_move_infeasibility[var_idx],
       fj.violated_constraints.size());
 #endif
@@ -825,58 +723,89 @@ DI void update_lift_moves(typename fj_t<i_t, f_t>::climber_data_t::view_t fj)
     f_t obj_coeff = fj.pb.objective_coefficients[var_idx];
     f_t delta     = -std::numeric_limits<f_t>::infinity();
 
-    f_t th_lower_domain             = fj.pb.variable_lower_bounds[var_idx];
-    f_t th_upper_domain             = fj.pb.variable_upper_bounds[var_idx];
+    auto bounds                     = fj.pb.variable_bounds[var_idx];
+    f_t th_lower_delta              = get_lower(bounds) - fj.incumbent_assignment[var_idx];
+    f_t th_upper_delta              = get_upper(bounds) - fj.incumbent_assignment[var_idx];
     auto [offset_begin, offset_end] = fj.pb.reverse_range_for_var(var_idx);
     for (i_t j = threadIdx.x + offset_begin; j < offset_end; j += blockDim.x) {
-      auto cstr_idx   = fj.pb.reverse_constraints[j];
-      auto cstr_coeff = fj.pb.reverse_coefficients[j];
-      f_t c_lb        = fj.pb.constraint_lower_bounds[cstr_idx];
-      f_t c_ub        = fj.pb.constraint_upper_bounds[cstr_idx];
+      auto cstr_idx      = fj.pb.reverse_constraints[j];
+      auto cstr_coeff    = fj.pb.reverse_coefficients[j];
+      f_t c_lb           = fj.pb.constraint_lower_bounds[cstr_idx];
+      f_t c_ub           = fj.pb.constraint_upper_bounds[cstr_idx];
+      f_t cstr_tolerance = fj.get_corrected_tolerance(cstr_idx);
       cuopt_assert(c_lb <= c_ub, "invalid bounds");
       cuopt_assert(fj.cstr_satisfied(cstr_idx, fj.incumbent_lhs[cstr_idx]),
                    "cstr should be satisfied");
 
-      auto [delta, sign, slack, cstr_tolerance] =
-        get_mtm_for_constraint<i_t, f_t, MTMMoveType::FJ_MTM_SATISFIED>(
-          fj, var_idx, cstr_idx, cstr_coeff);
+      // Process each bound separately, as both are satified and may both be finite
+      // otherwise range constraints aren't correctly handled
+      for (auto [bound, sign] : {std::make_tuple(c_lb, -1), std::make_tuple(c_ub, 1)}) {
+        auto [delta, slack] =
+          get_mtm_for_bound<i_t, f_t>(fj, var_idx, cstr_idx, cstr_coeff, bound, sign);
 
-      // skip this variable if there is no slack
-      if (fabs(slack) <= cstr_tolerance) {
-        th_lower_domain = th_upper_domain = fj.incumbent_assignment[var_idx];
-        continue;
-      }
+        if (cstr_coeff * sign < 0) {
+          if (fj.pb.is_integer_var(var_idx)) delta = ceil(delta);
+        } else {
+          if (fj.pb.is_integer_var(var_idx)) delta = floor(delta);
+        }
 
-      cuopt_assert(isfinite(delta), "");
-      cuopt_assert(isfinite(fj.incumbent_assignment[var_idx] + delta), "");
-      if (cstr_coeff * sign < 0) {
-        if (fj.pb.is_integer_var(var_idx)) delta = ceil(delta);
-        th_lower_domain = max(th_lower_domain, fj.incumbent_assignment[var_idx] + delta);
-      } else {
-        if (fj.pb.is_integer_var(var_idx)) delta = floor(delta);
-        th_upper_domain = min(th_upper_domain, fj.incumbent_assignment[var_idx] + delta);
+        // skip this variable if there is no slack
+        if (fabs(slack) <= cstr_tolerance) {
+          if (cstr_coeff * sign > 0) {
+            th_upper_delta = 0;
+          } else {
+            th_lower_delta = 0;
+          }
+        } else if (!fj.pb.check_variable_within_bounds(var_idx,
+                                                       fj.incumbent_assignment[var_idx] + delta)) {
+          continue;
+        } else {
+          if (cstr_coeff * sign < 0) {
+            th_lower_delta = max(th_lower_delta, delta);
+          } else {
+            th_upper_delta = min(th_upper_delta, delta);
+          }
+        }
       }
+      if (th_lower_delta >= th_upper_delta) break;
     }
 
     // cub::BlockReduce because raft::blockReduce has a bug when using min() w/ floats
     // lfd = lift feasible domain
-    f_t lfd_lb = BlockReduce(shmem.cub).Reduce(th_lower_domain, cuda::maximum());
+    f_t lfd_lb = BlockReduce(shmem.cub).Reduce(th_lower_delta, cuda::maximum());
     __syncthreads();
-    f_t lfd_ub = BlockReduce(shmem.cub).Reduce(th_upper_domain, cuda::minimum());
+    f_t lfd_ub = BlockReduce(shmem.cub).Reduce(th_upper_delta, cuda::minimum());
 
-    if (lfd_lb >= lfd_ub) continue;
+    // invalid crossing bounds
+    if (lfd_lb >= lfd_ub) { lfd_lb = lfd_ub = 0; }
+
+    if (!fj.pb.check_variable_within_bounds(var_idx, fj.incumbent_assignment[var_idx] + lfd_lb)) {
+      lfd_lb = 0;
+    }
+    if (!fj.pb.check_variable_within_bounds(var_idx, fj.incumbent_assignment[var_idx] + lfd_ub)) {
+      lfd_ub = 0;
+    }
 
     // Now that the life move domain is computed, compute the correct lift move
     cuopt_assert(isfinite(fj.incumbent_assignment[var_idx]), "invalid assignment value");
     delta = obj_coeff < 0 ? lfd_ub : lfd_lb;
-    delta = delta - fj.incumbent_assignment[var_idx];
+    if (!isfinite(delta)) delta = 0;
+
+    // check that the move is actually feasible.
+    cuopt_func_call(__shared__ f_t shared_delta;) if (threadIdx.x == 0)
+      cuopt_func_call(shared_delta = delta);
+    cuopt_func_call(__syncthreads());
+    cuopt_func_call(auto recomputed_score =
+                      (compute_new_score<i_t, f_t, TPB>(fj, var_idx, shared_delta)));
+    if (threadIdx.x == 0)
+      cuopt_assert(recomputed_score.infeasibility >= 0, "move creates infeasibility");
 
     // get the score
     auto score = fj_t<i_t, f_t>::move_score_t::zero();
 
     f_t obj_score = -1 * obj_coeff * delta;  // negated to turn this into a positive score
-    score.base    = obj_score;
-    if (threadIdx.x == 0 && isfinite(delta) && !fj.pb.integer_equal(delta, (f_t)0)) {
+    score.base    = round(obj_score);
+    if (threadIdx.x == 0 && !fj.pb.integer_equal(delta, (f_t)0)) {
       fj.move_delta(FJ_MOVE_LIFT, var_idx)       = delta;
       fj.move_score(FJ_MOVE_LIFT, var_idx)       = score;
       fj.move_last_update(FJ_MOVE_LIFT, var_idx) = *fj.iterations;
@@ -890,44 +819,6 @@ template <typename i_t, typename f_t>
 __global__ void update_lift_moves_kernel(typename fj_t<i_t, f_t>::climber_data_t::view_t fj)
 {
   update_lift_moves<i_t, f_t, TPB_liftmoves>(fj);
-}
-
-template <typename i_t, typename f_t>
-DI f_t get_breakthrough_move(typename fj_t<i_t, f_t>::climber_data_t::view_t fj, i_t var_idx)
-{
-  f_t obj_coeff = fj.pb.objective_coefficients[var_idx];
-  f_t v_lb      = fj.pb.variable_lower_bounds[var_idx];
-  f_t v_ub      = fj.pb.variable_upper_bounds[var_idx];
-  cuopt_assert(isfinite(v_lb) || isfinite(v_ub), "unexpected free variable");
-  cuopt_assert(v_lb <= v_ub, "invalid bounds");
-  cuopt_assert(fj.pb.check_variable_within_bounds(var_idx, fj.incumbent_assignment[var_idx]),
-               "invalid incumbent assignment");
-  cuopt_assert(isfinite(obj_coeff), "invalid objective coefficient");
-  cuopt_assert(obj_coeff != 0, "objective coefficient shouldn't be null");
-
-  f_t excess = (*fj.best_objective) - *fj.incumbent_objective;
-
-  cuopt_assert(isfinite(excess) && excess < 0,
-               "breakthru move invoked during invalid solver state");
-
-  f_t old_val = fj.incumbent_assignment[var_idx];
-  f_t new_val = old_val;
-
-  f_t delta_ij = excess / obj_coeff;
-
-  if (fj.pb.is_integer_var(var_idx)) {
-    new_val = obj_coeff > 0 ? floor(old_val + delta_ij + fj.pb.tolerances.integrality_tolerance)
-                            : ceil(old_val + delta_ij - fj.pb.tolerances.integrality_tolerance);
-  } else {
-    new_val = old_val + delta_ij;
-  }
-
-  // fallback
-  if (!fj.pb.check_variable_within_bounds(var_idx, new_val)) {
-    new_val = obj_coeff > 0 ? v_lb : v_ub;
-  }
-
-  return new_val;
 }
 
 template <typename i_t, typename f_t, i_t TPB>
@@ -1121,8 +1012,8 @@ __device__ void compute_mtm_moves(typename fj_t<i_t, f_t>::climber_data_t::view_
 
     bool exclude_from_search = false;
     // "fixed" variables are to be excluded (as they cannot take any other value)
-    exclude_from_search |= fj.pb.integer_equal(fj.pb.variable_lower_bounds[var_idx],
-                                               fj.pb.variable_upper_bounds[var_idx]);
+    auto bounds = fj.pb.variable_bounds[var_idx];
+    exclude_from_search |= fj.pb.integer_equal(get_lower(bounds), get_upper(bounds));
 
     if (exclude_from_search) {
       if (threadIdx.x == 0) {
@@ -1153,7 +1044,9 @@ __global__ void select_variable_kernel(typename fj_t<i_t, f_t>::climber_data_t::
   raft::random::PCGenerator rng(
     fj.settings->seed, *fj.iterations * fj.settings->parameters.max_sampled_moves, 0);
 
-  __shared__ typename fj_t<i_t, f_t>::move_score_t shmem[2 * raft::WarpSize];
+  using move_score_t = typename fj_t<i_t, f_t>::move_score_t;
+  __shared__ alignas(move_score_t) char shmem_storage[2 * raft::WarpSize * sizeof(move_score_t)];
+  auto* const shmem = (move_score_t*)shmem_storage;
 
   auto th_best_score  = fj_t<i_t, f_t>::move_score_t::invalid();
   i_t th_selected_var = std::numeric_limits<i_t>::max();
@@ -1173,6 +1066,15 @@ __global__ void select_variable_kernel(typename fj_t<i_t, f_t>::climber_data_t::
       auto setidx     = (i + offset) % good_var_count;
       auto var_idx    = fj.candidate_variables.contents[setidx];
       auto move_score = fj.jump_move_scores[var_idx];
+
+      auto bounds          = fj.pb.variable_bounds[var_idx];
+      i_t var_range        = get_upper(bounds) - get_lower(bounds);
+      double delta_rel_err = fabs(fj.jump_move_delta[var_idx]) / var_range;
+      // tabu for small moves to avoid very long descents/numerical issues
+      if (delta_rel_err < fj.settings->parameters.small_move_tabu_threshold &&
+          *fj.iterations - *fj.small_move_tabu < fj.settings->parameters.small_move_tabu_tenure) {
+        continue;
+      }
 
       if (move_score > th_best_score ||
           (move_score == th_best_score && var_idx > th_selected_var)) {
@@ -1213,12 +1115,17 @@ __global__ void select_variable_kernel(typename fj_t<i_t, f_t>::climber_data_t::
     *fj.selected_var                 = selected_var;
     if (selected_var != std::numeric_limits<i_t>::max()) {
 #if FJ_SINGLE_STEP
+      auto bounds          = fj.pb.variable_bounds[selected_var];
+      i_t var_range        = get_upper(bounds) - get_lower(bounds);
+      double delta_rel_err = fabs(fj.jump_move_delta[selected_var]) / var_range * 100;
       DEVICE_LOG_INFO(
-        "=---- FJ: selected %d [%g/%g] :%.2g+{%.2g}=%.2g score {%g,%g}, d_obj %.2g+%.2g->%.2g, "
+        "=---- FJ: selected %d [%g/%g] %c :%.4g+{%.4g}=%.4g score {%g,%g}, d_obj %.2g+%.2g->%.2g, "
+        "delta_rel_err %.2g%%, "
         "infeas %.2g, total viol %d, out of %d\n",
         selected_var,
-        fj.pb.variable_lower_bounds[selected_var],
-        fj.pb.variable_upper_bounds[selected_var],
+        get_lower(bounds),
+        get_upper(bounds),
+        fj.pb.variable_types[selected_var] == var_t::INTEGER ? 'I' : 'C',
         fj.incumbent_assignment[selected_var],
         fj.jump_move_delta[selected_var],
         fj.incumbent_assignment[selected_var] + fj.jump_move_delta[selected_var],
@@ -1228,6 +1135,7 @@ __global__ void select_variable_kernel(typename fj_t<i_t, f_t>::climber_data_t::
         fj.jump_move_delta[selected_var] * fj.pb.objective_coefficients[selected_var],
         *fj.incumbent_objective +
           fj.jump_move_delta[selected_var] * fj.pb.objective_coefficients[selected_var],
+        delta_rel_err,
         fj.jump_move_infeasibility[selected_var],
         fj.violated_constraints.size(),
         good_var_count);
@@ -1300,7 +1208,9 @@ DI thrust::tuple<i_t, f_t, typename fj_t<i_t, f_t>::move_score_t> gridwide_reduc
   cg::this_grid().sync();
 
   if (blockIdx.x == 0) {
-    __shared__ typename fj_t<i_t, f_t>::move_score_t shmem[2 * raft::WarpSize];
+    using move_score_t = typename fj_t<i_t, f_t>::move_score_t;
+    __shared__ alignas(move_score_t) char shmem_storage[2 * raft::WarpSize * sizeof(move_score_t)];
+    auto* const shmem = (move_score_t*)shmem_storage;
 
     auto th_best_score = fj_t<i_t, f_t>::move_score_t::invalid();
     i_t th_best_block  = 0;
@@ -1380,8 +1290,11 @@ __global__ void handle_local_minimum_kernel(typename fj_t<i_t, f_t>::climber_dat
   raft::random::PCGenerator rng(fj.settings->seed + *fj.iterations, 0, 0);
   __shared__ typename fj_t<i_t, f_t>::move_score_t shmem[2 * raft::WarpSize];
   if (*fj.break_condition) return;
+
   // did we reach a local minimum?
   if (*fj.selected_var != std::numeric_limits<i_t>::max()) return;
+
+  cuopt_assert(blockDim.x == TPB_localmin, "invalid TPB");
 
   auto best_score = fj_t<i_t, f_t>::move_score_t::invalid();
   i_t best_var    = std::numeric_limits<i_t>::max();
@@ -1392,13 +1305,27 @@ __global__ void handle_local_minimum_kernel(typename fj_t<i_t, f_t>::climber_dat
   // Local minimum, update weights.
   if (fj.settings->update_weights) update_weights<i_t, f_t>(fj);
 
-  cuopt_assert(blockDim.x == TPB_localmin, "invalid TPB");
+  // force a full refresh
+  *fj.full_refresh_iteration = *fj.iterations;
 
   if (blockIdx.x == 0) {
     bool improving = save_best_solution<i_t, f_t>(fj);
     if (threadIdx.x == 0) {
       *fj.last_minimum_iteration = *fj.iterations;
-      if (improving) { *fj.last_improving_minimum = *fj.local_minimums_reached; }
+      // if we are doing a local search run (feas_run = false),
+      // make sure we only reset the counter when feasible solution is reached in local minimum
+      bool save_local_min_counter =
+        fj.settings->feasibility_run || fj.violated_constraints.size() == 0;
+      if (improving && save_local_min_counter) {
+        *fj.last_improving_minimum = *fj.local_minimums_reached;
+        // if the current objective is better than the parents (or any provided baseline)
+        // increase the number number of local minimax by x3
+        if (fj.settings->baseline_objective_for_longer_run >
+            *fj.incumbent_objective + fj.settings->parameters.breakthrough_move_epsilon) {
+          fj.settings->n_of_minimums_for_exit *= 3;
+          fj.settings->baseline_objective_for_longer_run = *fj.incumbent_objective;
+        }
+      }
       check_exit_condition<i_t, f_t>(fj);
       *fj.local_minimums_reached += 1;
     }
@@ -1406,6 +1333,45 @@ __global__ void handle_local_minimum_kernel(typename fj_t<i_t, f_t>::climber_dat
 
   // if we're in greedy-descent mode, stop here.
   if (fj.settings->mode == fj_mode_t::GREEDY_DESCENT) return;
+
+  // If we're in rounding mode and fractional variables remain, prioritize them.
+  if (fj.settings->mode == fj_mode_t::ROUNDING && fj.fractional_variables.size() > 0) {
+    if (blockIdx.x == 0) {
+      i_t selected =
+        fj.fractional_variables.contents[rng.next_u32() % fj.fractional_variables.size()];
+      cuopt_assert(
+        fj.pb.is_integer_var(selected) && !fj.pb.is_integer(fj.incumbent_assignment[selected]),
+        "fractional selected variable isn't actually fractional");
+
+      auto [best_val, score_info] =
+        compute_best_mtm<i_t, f_t, TPB_resetmoves, MTMMoveType::FJ_MTM_ALL>(fj, selected);
+      auto delta = best_val - fj.incumbent_assignment[selected];
+
+      // if no move was found, fallback to round-nearest
+      if (fj.pb.integer_equal(delta, 0)) {
+        auto bounds = fj.pb.variable_bounds[selected];
+        delta       = round_nearest(fj.incumbent_assignment[selected],
+                              get_lower(bounds),
+                              get_upper(bounds),
+                              fj.pb.tolerances.integrality_tolerance,
+                              rng) -
+                fj.incumbent_assignment[selected];
+      }
+
+      if (FIRST_THREAD) {
+        fj.jump_move_delta[selected] = delta;
+        *fj.selected_var             = selected;
+        auto bounds                  = fj.pb.variable_bounds[*fj.selected_var];
+        DEVICE_LOG_TRACE("selected_var: %d bounds [%.4g/%.4g], delta %g, old val %g\n",
+                         *fj.selected_var,
+                         get_lower(bounds),
+                         get_upper(bounds),
+                         fj.jump_move_delta[*fj.selected_var],
+                         fj.incumbent_assignment[*fj.selected_var]);
+      }
+    }
+    return;
+  }
 
   // Pick the best move among the variables involved in a random violated constraint.
   if (!fj.violated_constraints.empty()) {
@@ -1466,9 +1432,6 @@ __global__ void handle_local_minimum_kernel(typename fj_t<i_t, f_t>::climber_dat
                    "assignment not within bounds");
       fj.jump_move_delta[best_var] = best_delta;
     }
-
-    // force a full refresh
-    *fj.full_refresh_iteration = *fj.iterations;
   }
 }
 

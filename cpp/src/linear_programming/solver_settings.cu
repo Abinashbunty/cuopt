@@ -18,10 +18,10 @@
 #include <cuopt/error.hpp>
 #include <cuopt/linear_programming/pdlp/pdlp_warm_start_data.hpp>
 #include <cuopt/linear_programming/pdlp/solver_settings.hpp>
-#include <cuopt/logger.hpp>
 #include <math_optimization/solution_writer.hpp>
 #include <mip/mip_constants.hpp>
 #include <mps_parser/utilities/span.hpp>
+#include <utilities/logger.hpp>
 
 #include <raft/util/cudart_utils.hpp>
 
@@ -45,6 +45,13 @@ pdlp_solver_settings_t<i_t, f_t>::pdlp_solver_settings_t(const pdlp_solver_setti
     sol_file(other.sol_file),
     per_constraint_residual(other.per_constraint_residual),
     crossover(other.crossover),
+    folding(other.folding),
+    augmented(other.augmented),
+    dualize(other.dualize),
+    ordering(other.ordering),
+    barrier_dual_initial_point(other.barrier_dual_initial_point),
+    cudss_deterministic(other.cudss_deterministic),
+    eliminate_dense_columns(other.eliminate_dense_columns),
     save_best_primal_so_far(other.save_best_primal_so_far),
     first_primal_feasible(other.first_primal_feasible),
     pdlp_warm_start_data_(other.pdlp_warm_start_data_, stream_view),

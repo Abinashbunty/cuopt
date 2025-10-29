@@ -130,23 +130,26 @@ TEST(docs, user_problem_file)
   // Create the problem from documentation example
   auto problem = create_doc_example_problem();
 
-  EXPECT_FALSE(std::filesystem::exists("user_problem.mps"));
+  const auto user_problem_path = std::filesystem::temp_directory_path() / "user_problem.mps";
+  EXPECT_FALSE(std::filesystem::exists(user_problem_path));
 
   settings.time_limit        = test_time_limit;
-  settings.user_problem_file = "user_problem.mps";
+  settings.user_problem_file = user_problem_path;
+  settings.presolve          = false;
   EXPECT_EQ(solve_mip(&handle_, problem, settings).get_termination_status(),
             mip_termination_status_t::Optimal);
 
-  EXPECT_TRUE(std::filesystem::exists("user_problem.mps"));
+  EXPECT_TRUE(std::filesystem::exists(user_problem_path));
 
   cuopt::mps_parser::mps_data_model_t<int, double> problem2 =
-    cuopt::mps_parser::parse_mps<int, double>("user_problem.mps", false);
+    cuopt::mps_parser::parse_mps<int, double>(user_problem_path, false);
 
   EXPECT_EQ(problem2.get_n_variables(), problem.get_n_variables());
   EXPECT_EQ(problem2.get_n_constraints(), problem.get_n_constraints());
   EXPECT_EQ(problem2.get_nnz(), problem.get_nnz());
 
-  settings.user_problem_file           = "user_problem2.mps";
+  const auto user_problem_path2 = std::filesystem::temp_directory_path() / "user_problem2.mps";
+  settings.user_problem_file    = user_problem_path2;
   mip_solution_t<int, double> solution = solve_mip(&handle_, problem2, settings);
   EXPECT_EQ(solution.get_termination_status(), mip_termination_status_t::Optimal);
 
@@ -157,12 +160,16 @@ TEST(docs, user_problem_file)
   // Get solution values
   const auto& sol_values = solution.get_solution();
   // x should be approximately 37 and integer
-  EXPECT_NEAR(37.0, sol_values.element(0, handle_.get_stream()), 0.1);
-  EXPECT_NEAR(std::round(sol_values.element(0, handle_.get_stream())),
-              sol_values.element(0, handle_.get_stream()),
-              settings.tolerances.integrality_tolerance);  // Check x is integer
-  // y should be approximately 39.5
-  EXPECT_NEAR(39.5, sol_values.element(1, handle_.get_stream()), 0.1);
+  for (int i = 0; i < problem2.get_n_variables(); i++) {
+    if (problem2.get_variable_names()[i] == "x") {
+      EXPECT_NEAR(37.0, sol_values.element(i, handle_.get_stream()), 0.1);
+      EXPECT_NEAR(std::round(sol_values.element(i, handle_.get_stream())),
+                  sol_values.element(i, handle_.get_stream()),
+                  settings.tolerances.integrality_tolerance);  // Check x is integer
+    } else {                                                   // y should be approximately 39.5
+      EXPECT_NEAR(39.5, sol_values.element(i, handle_.get_stream()), 0.1);
+    }
+  }
 }
 
 }  // namespace cuopt::linear_programming::test

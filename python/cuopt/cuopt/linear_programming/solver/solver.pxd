@@ -39,6 +39,7 @@ cdef extern from "cuopt/linear_programming/pdlp/solver_settings.hpp" namespace "
         Stable2 "cuopt::linear_programming::pdlp_solver_mode_t::Stable2" # noqa
         Methodical1 "cuopt::linear_programming::pdlp_solver_mode_t::Methodical1" # noqa
         Fast1 "cuopt::linear_programming::pdlp_solver_mode_t::Fast1" # noqa
+        Stable3 "cuopt::linear_programming::pdlp_solver_mode_t::Stable3" # noqa
 
 cdef extern from "cuopt/linear_programming/solver_settings.hpp" namespace "cuopt::linear_programming": # noqa
 
@@ -84,7 +85,7 @@ cdef extern from "cuopt/linear_programming/solver_settings.hpp" namespace "cuopt
         ) except +
 
         # MIP settings
-        void set_initial_mip_solution(
+        void add_initial_mip_solution(
             const f_t* initial_solution,
             i_t size
         ) except +

@@ -20,10 +20,14 @@
 #include <cuopt/linear_programming/optimization_problem.hpp>
 #include <cuopt/linear_programming/solve.hpp>
 #include <cuopt/linear_programming/solver_settings.hpp>
-#include <cuopt/logger.hpp>
+#include <cuopt/utilities/timestamp_utils.hpp>
+#include <utilities/logger.hpp>
 
 #include <mps_parser/parser.hpp>
 
+#include <cuopt/version_config.hpp>
+
+#include <cstdlib>
 #include <memory>
 #include <string>
 
@@ -58,6 +62,19 @@ struct solution_and_stream_view_t {
 int8_t cuOptGetFloatSize() { return sizeof(cuopt_float_t); }
 
 int8_t cuOptGetIntSize() { return sizeof(cuopt_int_t); }
+
+cuopt_int_t cuOptGetVersion(cuopt_int_t* version_major,
+                            cuopt_int_t* version_minor,
+                            cuopt_int_t* version_patch)
+{
+  if (version_major == nullptr || version_minor == nullptr || version_patch == nullptr) {
+    return CUOPT_INVALID_ARGUMENT;
+  }
+  *version_major = CUOPT_VERSION_MAJOR;
+  *version_minor = CUOPT_VERSION_MINOR;
+  *version_patch = CUOPT_VERSION_PATCH;
+  return CUOPT_SUCCESS;
+}
 
 cuopt_int_t cuOptReadProblem(const char* filename, cuOptOptimizationProblem* problem_ptr)
 {
@@ -100,6 +117,8 @@ cuopt_int_t cuOptCreateProblem(cuopt_int_t num_constraints,
                                const char* variable_types,
                                cuOptOptimizationProblem* problem_ptr)
 {
+  cuopt::utilities::printTimestamp("CUOPT_CREATE_PROBLEM");
+
   if (problem_ptr == nullptr || objective_coefficients == nullptr ||
       constraint_matrix_row_offsets == nullptr || constraint_matrix_column_indices == nullptr ||
       constraint_matrix_coefficent_values == nullptr || constraint_sense == nullptr ||
@@ -155,6 +174,8 @@ cuopt_int_t cuOptCreateRangedProblem(cuopt_int_t num_constraints,
                                      const char* variable_types,
                                      cuOptOptimizationProblem* problem_ptr)
 {
+  cuopt::utilities::printTimestamp("CUOPT_CREATE_PROBLEM");
+
   if (problem_ptr == nullptr || objective_coefficients == nullptr ||
       constraint_matrix_row_offsets == nullptr || constraint_matrix_column_indices == nullptr ||
       constraint_matrix_coefficent_values == nullptr || constraint_lower_bounds == nullptr ||
@@ -422,7 +443,7 @@ cuopt_int_t cuOptGetVariableTypes(cuOptOptimizationProblem problem, char* variab
              variable_types.size(),
              problem_and_stream_view->stream_view);
   problem_and_stream_view->stream_view.synchronize();
-  for (int j = 0; j < variable_types_host.size(); j++) {
+  for (size_t j = 0; j < variable_types_host.size(); j++) {
     variable_types_ptr[j] =
       variable_types_host[j] == var_t::INTEGER ? CUOPT_INTEGER : CUOPT_CONTINUOUS;
   }
@@ -581,6 +602,8 @@ cuopt_int_t cuOptSolve(cuOptOptimizationProblem problem,
                        cuOptSolverSettings settings,
                        cuOptSolution* solution_ptr)
 {
+  cuopt::utilities::printTimestamp("CUOPT_SOLVE_START");
+
   if (problem == nullptr) { return CUOPT_INVALID_ARGUMENT; }
   if (settings == nullptr) { return CUOPT_INVALID_ARGUMENT; }
   if (solution_ptr == nullptr) { return CUOPT_INVALID_ARGUMENT; }
@@ -599,6 +622,9 @@ cuopt_int_t cuOptSolve(cuOptOptimizationProblem problem,
     solution_and_stream_view->mip_solution_ptr = new mip_solution_t<cuopt_int_t, cuopt_float_t>(
       solve_mip<cuopt_int_t, cuopt_float_t>(*op_problem, mip_settings));
     *solution_ptr = static_cast<cuOptSolution>(solution_and_stream_view);
+
+    cuopt::utilities::printTimestamp("CUOPT_SOLVE_RETURN");
+
     return static_cast<cuopt_int_t>(
       solution_and_stream_view->mip_solution_ptr->get_error_status().get_error_type());
   } else {
@@ -614,6 +640,9 @@ cuopt_int_t cuOptSolve(cuOptOptimizationProblem problem,
       new optimization_problem_solution_t<cuopt_int_t, cuopt_float_t>(
         solve_lp<cuopt_int_t, cuopt_float_t>(*op_problem, pdlp_settings));
     *solution_ptr = static_cast<cuOptSolution>(solution_and_stream_view);
+
+    cuopt::utilities::printTimestamp("CUOPT_SOLVE_RETURN");
+
     return static_cast<cuopt_int_t>(
       solution_and_stream_view->lp_solution_ptr->get_error_status().get_error_type());
   }
@@ -821,6 +850,24 @@ cuopt_int_t cuOptGetDualSolution(cuOptSolution solution, cuopt_float_t* dual_sol
                dual_solution.size(),
                solution_and_stream_view->stream_view);
     solution_and_stream_view->stream_view.synchronize();
+    return CUOPT_SUCCESS;
+  }
+}
+
+cuopt_int_t cuOptGetDualObjectiveValue(cuOptSolution solution,
+                                       cuopt_float_t* dual_objective_value_ptr)
+{
+  if (solution == nullptr) { return CUOPT_INVALID_ARGUMENT; }
+  if (dual_objective_value_ptr == nullptr) { return CUOPT_INVALID_ARGUMENT; }
+  solution_and_stream_view_t* solution_and_stream_view =
+    static_cast<solution_and_stream_view_t*>(solution);
+  if (solution_and_stream_view->is_mip) {
+    return CUOPT_INVALID_ARGUMENT;
+  } else {
+    optimization_problem_solution_t<cuopt_int_t, cuopt_float_t>* optimization_problem_solution =
+      static_cast<optimization_problem_solution_t<cuopt_int_t, cuopt_float_t>*>(
+        solution_and_stream_view->lp_solution_ptr);
+    *dual_objective_value_ptr = optimization_problem_solution->get_dual_objective_value();
     return CUOPT_SUCCESS;
   }
 }

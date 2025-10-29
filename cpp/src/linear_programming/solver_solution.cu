@@ -16,9 +16,9 @@
  */
 
 #include <cuopt/linear_programming/pdlp/solver_solution.hpp>
-#include <cuopt/logger.hpp>
 #include <math_optimization/solution_writer.hpp>
 #include <mip/mip_constants.hpp>
+#include <utilities/logger.hpp>
 
 #include <raft/common/nvtx.hpp>
 #include <raft/util/cudart_utils.hpp>
@@ -307,6 +307,12 @@ template <typename i_t, typename f_t>
 f_t optimization_problem_solution_t<i_t, f_t>::get_objective_value() const
 {
   return termination_stats_.primal_objective;
+}
+
+template <typename i_t, typename f_t>
+f_t optimization_problem_solution_t<i_t, f_t>::get_dual_objective_value() const
+{
+  return termination_stats_.dual_objective;
 }
 
 template <typename i_t, typename f_t>

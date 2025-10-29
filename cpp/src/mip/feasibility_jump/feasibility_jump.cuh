@@ -34,13 +34,14 @@
 
 namespace cuopt::linear_programming::detail {
 
-static constexpr int TPB_resetmoves  = raft::WarpSize * 4;
-static constexpr int TPB_heavyvars   = raft::WarpSize * 16;
-static constexpr int TPB_heavycstrs  = raft::WarpSize * 4;
-static constexpr int TPB_localmin    = raft::WarpSize * 4;
-static constexpr int TPB_setval      = raft::WarpSize * 16;
-static constexpr int TPB_liftmoves   = raft::WarpSize * 4;
-static constexpr int TPB_loadbalance = raft::WarpSize * 4;
+static constexpr int TPB_resetmoves                 = raft::WarpSize * 4;
+static constexpr int TPB_heavyvars                  = raft::WarpSize * 16;
+static constexpr int TPB_heavycstrs                 = raft::WarpSize * 4;
+static constexpr int TPB_localmin                   = raft::WarpSize * 4;
+static constexpr int TPB_setval                     = raft::WarpSize * 16;
+static constexpr int TPB_update_changed_constraints = raft::WarpSize * 4;
+static constexpr int TPB_liftmoves                  = raft::WarpSize * 4;
+static constexpr int TPB_loadbalance                = raft::WarpSize * 4;
 
 struct fj_hyper_parameters_t {
   // The number of moves to evaluate, if there are many positive-score
@@ -56,7 +57,7 @@ struct fj_hyper_parameters_t {
   int global_move_update_period      = 10;
   int heavy_move_update_period       = 50;
   int sync_period                    = 200;
-  int lhs_refresh_period             = 1000;
+  int lhs_refresh_period             = 500;
   int allow_infeasibility_iterations = 200;
   // The value added to the objective weight everytime a new best solution is
   // found in order to move towards better solutions
@@ -71,16 +72,15 @@ struct fj_hyper_parameters_t {
   double excess_improvement_weight    = (1.0 / 2.0);
   double weight_smoothing_probability = 0.0003;
 
+  double fractional_score_multiplier = 100;
+  double rounding_second_stage_split = 0.1;
+
+  double small_move_tabu_threshold = 1e-6;
+  int small_move_tabu_tenure       = 4;
+
   // load-balancing related settings
   int old_codepath_total_var_to_relvar_ratio_threshold = 200;
   int load_balancing_codepath_min_varcount             = 3200;
-};
-
-// instead of putting in a type dependent class, put it in a name space
-// easy to access and prevents variable shadowing
-enum fj_termination_flags_t {
-  FJ_TERMINATION_TIME_LIMIT      = (1 << 0),
-  FJ_TERMINATION_ITERATION_LIMIT = (1 << 1)
 };
 
 enum fj_move_type_t {
@@ -94,8 +94,11 @@ enum class fj_mode_t {
   FIRST_FEASIBLE,     // iterate until a feasible solution is found, then return
   GREEDY_DESCENT,     // single descent until no improving jumps can be made
   TREE,               // tree mode
+  ROUNDING,           // FJ as rounding procedure for fractionals
   EXIT_NON_IMPROVING  // iterate until we are don't improve the best
 };
+
+enum class MTMMoveType { FJ_MTM_VIOLATED, FJ_MTM_SATISFIED, FJ_MTM_ALL };
 
 enum class fj_load_balancing_mode_t { ALWAYS_ON, AUTO, ALWAYS_OFF };
 
@@ -105,7 +108,6 @@ struct fj_settings_t {
   int seed{0};
   fj_mode_t mode{fj_mode_t::FIRST_FEASIBLE};
   fj_candidate_selection_t candidate_selection{fj_candidate_selection_t::WEIGHTED_SCORE};
-  int termination{fj_termination_flags_t::FJ_TERMINATION_TIME_LIMIT};
   double time_limit{60.0};
   int iteration_limit{std::numeric_limits<int>::max()};
   fj_hyper_parameters_t parameters{};
@@ -113,15 +115,24 @@ struct fj_settings_t {
   double infeasibility_weight = 1.0;
   bool update_weights         = true;
   bool feasibility_run        = true;
-  bool keep_farthest_l1_sol   = false;
   fj_load_balancing_mode_t load_balancing_mode{fj_load_balancing_mode_t::AUTO};
+  double baseline_objective_for_longer_run{std::numeric_limits<double>::lowest()};
 };
 
 struct fj_move_t {
   int var_idx;
   double value;
 
-  bool operator<(const fj_move_t& rhs) const { return value < rhs.value; }
+  bool operator<(const fj_move_t& rhs) const
+  {
+    if (var_idx == rhs.var_idx) return value < rhs.value;
+    return var_idx < rhs.var_idx;
+  }
+  bool operator==(const fj_move_t& rhs) const
+  {
+    return var_idx == rhs.var_idx && value == rhs.value;
+  }
+  bool operator!=(const fj_move_t& rhs) const { return !(*this == rhs); }
 };
 
 // TODO: use 32bit integers instead,
@@ -188,6 +199,9 @@ struct fj_move_candidate_t {
 };
 
 template <typename i_t, typename f_t>
+struct fj_cpu_climber_t;
+
+template <typename i_t, typename f_t>
 class fj_t {
  public:
   using move_score_t      = fj_staged_score_t;
@@ -198,6 +212,15 @@ class fj_t {
   ~fj_t();
   void reset_cuda_graph();
   i_t solve(solution_t<i_t, f_t>& solution);
+  std::unique_ptr<fj_cpu_climber_t<i_t, f_t>> create_cpu_climber(
+    solution_t<i_t, f_t>& solution,
+    const std::vector<f_t>& left_weights,
+    const std::vector<f_t>& right_weights,
+    f_t objective_weight,
+    fj_settings_t settings = fj_settings_t{},
+    bool randomize_params  = false);
+  bool cpu_solve(fj_cpu_climber_t<i_t, f_t>& fj_cpu,
+                 f_t time_limit = +std::numeric_limits<f_t>::infinity());
   i_t alloc_max_climbers(i_t desired_climbers);
   void resize_vectors(const raft::handle_t* handle_ptr);
   void device_init(const rmm::cuda_stream_view& stream);
@@ -206,7 +229,9 @@ class fj_t {
   void set_fj_settings(fj_settings_t settings_);
   void reset_weights(const rmm::cuda_stream_view& stream, f_t weight = 10.);
   void randomize_weights(const raft::handle_t* handle_ptr);
-  void copy_weights(const weight_t<i_t, f_t>& weights, const raft::handle_t* handle_ptr);
+  void copy_weights(const weight_t<i_t, f_t>& weights,
+                    const raft::handle_t* handle_ptr,
+                    std::optional<i_t> new_size = std::nullopt);
   i_t host_loop(solution_t<i_t, f_t>& solution, i_t climber_idx = 0);
   void run_step_device(i_t climber_idx = 0, bool use_graph = true);
   void run_step_device(const rmm::cuda_stream_view& stream,
@@ -215,6 +240,8 @@ class fj_t {
   void refresh_lhs_and_violation(const rmm::cuda_stream_view& stream, i_t climber_idx = 0);
   // load balancing
   void load_balancing_score_update(const rmm::cuda_stream_view& stream, i_t climber_idx = 0);
+  // executed after a roudning FJ run if any fractionals remain to eliminate them
+  void round_remaining_fractionals(solution_t<i_t, f_t>& solution, i_t climber_idx = 0);
 
  public:
   mip_solver_context_t<i_t, f_t>& context;
@@ -250,6 +277,7 @@ class fj_t {
 
   // kernel launch dimensions, computed once inside the constructor
   std::pair<dim3, dim3> setval_launch_dims;
+  std::pair<dim3, dim3> update_changed_constraints_launch_dims;
   std::pair<dim3, dim3> resetmoves_launch_dims;
   std::pair<dim3, dim3> resetmoves_bin_launch_dims;
   std::pair<dim3, dim3> update_weights_launch_dims;
@@ -284,7 +312,6 @@ class fj_t {
     rmm::device_scalar<i_t> local_minimums_reached;
     rmm::device_scalar<i_t> iterations;
     rmm::device_scalar<f_t> best_excess;
-    rmm::device_scalar<f_t> best_l1_distance;
     rmm::device_scalar<f_t> best_objective;
     rmm::device_scalar<f_t> saved_solution_objective;
     rmm::device_scalar<f_t> incumbent_quality;
@@ -308,7 +335,6 @@ class fj_t {
     bitmap_t<uint32_t> iteration_related_variables;
     rmm::device_uvector<i_t> constraints_changed;
     rmm::device_uvector<f_t> best_assignment;
-    rmm::device_uvector<f_t> farthest_l1_sol;
     rmm::device_uvector<f_t> incumbent_assignment;
     rmm::device_uvector<f_t> incumbent_lhs;
     // compensation term of the Kahan summation algorithm
@@ -328,6 +354,12 @@ class fj_t {
     rmm::device_uvector<move_candidate_t> jump_candidates;
     rmm::device_uvector<i_t> jump_candidate_count;
     rmm::device_uvector<i_t> jump_locks;
+    rmm::device_scalar<i_t> small_move_tabu;
+
+    // ROUNDING mode related members
+    contiguous_set_t<i_t, f_t> fractional_variables;
+    rmm::device_scalar<i_t> saved_best_fractional_count;
+    rmm::device_scalar<bool> handle_fractionals_only;
 
     rmm::device_uvector<move_score_t> grid_score_buf;
     rmm::device_uvector<i_t> grid_var_buf;
@@ -347,7 +379,6 @@ class fj_t {
         local_minimums_reached(0, fj.handle_ptr->get_stream()),
         iterations(0, fj.handle_ptr->get_stream()),
         best_excess(-std::numeric_limits<f_t>::infinity(), fj.handle_ptr->get_stream()),
-        best_l1_distance(0., fj.handle_ptr->get_stream()),
         best_objective(+std::numeric_limits<f_t>::infinity(), fj.handle_ptr->get_stream()),
         saved_solution_objective(+std::numeric_limits<f_t>::infinity(),
                                  fj.handle_ptr->get_stream()),
@@ -361,7 +392,6 @@ class fj_t {
         iteration_related_variables(fj.pb_ptr->n_variables, fj.handle_ptr->get_stream()),
         constraints_changed(fj.pb_ptr->n_constraints, fj.handle_ptr->get_stream()),
         best_assignment(fj.pb_ptr->n_variables, fj.handle_ptr->get_stream()),
-        farthest_l1_sol(fj.pb_ptr->n_variables, fj.handle_ptr->get_stream()),
         tabu_nodec_until(fj.pb_ptr->n_variables, fj.handle_ptr->get_stream()),
         tabu_noinc_until(fj.pb_ptr->n_variables, fj.handle_ptr->get_stream()),
         tabu_lastdec(fj.pb_ptr->n_variables, fj.handle_ptr->get_stream()),
@@ -380,6 +410,10 @@ class fj_t {
         jump_candidates(fj.pb_ptr->coefficients.size(), fj.handle_ptr->get_stream()),
         jump_candidate_count(fj.pb_ptr->n_variables, fj.handle_ptr->get_stream()),
         jump_locks(fj.pb_ptr->n_variables, fj.handle_ptr->get_stream()),
+        fractional_variables(fj.pb_ptr->n_variables, fj.handle_ptr->get_stream()),
+        small_move_tabu(0, fj.handle_ptr->get_stream()),
+        handle_fractionals_only(false, fj.handle_ptr->get_stream()),
+        saved_best_fractional_count(0, fj.handle_ptr->get_stream()),
         candidate_arrived_workids(fj.pb_ptr->coefficients.size(), fj.handle_ptr->get_stream()),
         grid_score_buf(0, fj.handle_ptr->get_stream()),
         grid_var_buf(0, fj.handle_ptr->get_stream()),
@@ -416,7 +450,6 @@ class fj_t {
       raft::device_span<f_t> cstr_left_weights;
       raft::device_span<f_t> incumbent_assignment;
       raft::device_span<f_t> best_assignment;
-      raft::device_span<f_t> farthest_l1_sol;
       raft::device_span<f_t> incumbent_lhs;
       raft::device_span<f_t> incumbent_lhs_sumcomp;
       raft::device_span<move_score_t> jump_move_scores;
@@ -451,6 +484,10 @@ class fj_t {
       typename contiguous_set_t<i_t, f_t>::view_t candidate_variables;
       typename bitmap_t<uint32_t>::view_t iteration_related_variables;
 
+      // ROUNDING mode related members
+      typename contiguous_set_t<i_t, f_t>::view_t fractional_variables;
+      i_t* saved_best_fractional_count;
+      bool* handle_fractionals_only;
       // load balancing structures
       raft::device_span<i_t> row_size_bin_prefix_sum;
       raft::device_span<i_t> row_size_nonbin_prefix_sum;
@@ -465,7 +502,6 @@ class fj_t {
       i_t* iterations;
       i_t* last_iter_candidates;
       f_t* best_excess;
-      f_t* best_l1_distance;
       f_t* best_objective;
       f_t* saved_solution_objective;
       f_t* incumbent_quality;
@@ -476,6 +512,7 @@ class fj_t {
       i_t* full_refresh_iteration;
       cub::KeyValuePair<i_t, f_t>* best_jump_idx;
       f_t stop_threshold;
+      i_t* small_move_tabu;
 
       i_t* last_minimum_iteration;
       i_t* last_improving_minimum;
@@ -487,41 +524,52 @@ class fj_t {
 
       fj_settings_t* settings;
 
-      DI f_t lower_excess_score(i_t cstr, f_t lhs) const
+      HDI f_t lower_excess_score(i_t cstr, f_t lhs, f_t c_lb) const
       {
-        return raft::min(lhs - pb.constraint_lower_bounds[cstr], (f_t)0);
+        return raft::min(lhs - c_lb, (f_t)0);
       }
 
-      DI f_t upper_excess_score(i_t cstr, f_t lhs) const
+      HDI f_t upper_excess_score(i_t cstr, f_t lhs, f_t c_ub) const
       {
-        return raft::min(pb.constraint_upper_bounds[cstr] - lhs, (f_t)0);
+        return raft::min(c_ub - lhs, (f_t)0);
       }
 
       // Computes the constraint's contribution to the feasibility score:
       // If the constraint is satisfied by the given LHS value, returns 0.
       // If the constraint is violated by the given LHS value, returns -|lhs-rhs|.
       // caution: is inverted compared to solution_t's excess convention
-      DI f_t excess_score(i_t cstr, f_t lhs) const
+      HDI f_t excess_score(i_t cstr, f_t cnstr_value, f_t c_lb, f_t c_ub) const
       {
-        f_t right_score = upper_excess_score(cstr, lhs);
+        f_t right_score = upper_excess_score(cstr, cnstr_value, c_ub);
         if (right_score < 0.) { return right_score; }
-        return lower_excess_score(cstr, lhs);
+        return lower_excess_score(cstr, cnstr_value, c_lb);
+      }
+      HDI f_t excess_score(i_t cstr, f_t lhs) const
+      {
+        f_t c_lb        = pb.constraint_lower_bounds[cstr];
+        f_t c_ub        = pb.constraint_upper_bounds[cstr];
+        f_t right_score = upper_excess_score(cstr, lhs, c_ub);
+        if (right_score < 0.) { return right_score; }
+        return lower_excess_score(cstr, lhs, c_lb);
       }
 
       // FJ relies on maintaining a running LHS value for each constraint
       // which may suffer from numerical errors and lead to very slight (~machine epsilon)
       // violations of the actual bounds.
       // Use a slightly tightened tolerance in FJ to account for this.
-      DI f_t get_corrected_tolerance(i_t cstr) const
+      HDI f_t get_corrected_tolerance(i_t cstr, f_t c_lb, f_t c_ub) const
       {
-        f_t cstr_tolerance = get_cstr_tolerance<i_t, f_t>(pb.constraint_lower_bounds[cstr],
-                                                          pb.constraint_upper_bounds[cstr],
-                                                          pb.tolerances.absolute_tolerance,
-                                                          pb.tolerances.relative_tolerance);
-        return max((f_t)0, cstr_tolerance - MACHINE_EPSILON);
+        f_t cstr_tolerance = get_cstr_tolerance<i_t, f_t>(
+          c_lb, c_ub, pb.tolerances.absolute_tolerance, pb.tolerances.relative_tolerance);
+        return max((f_t)1e-12, cstr_tolerance - MACHINE_EPSILON);
+      }
+      HDI f_t get_corrected_tolerance(i_t cstr) const
+      {
+        return get_corrected_tolerance(
+          cstr, pb.constraint_lower_bounds[cstr], pb.constraint_upper_bounds[cstr]);
       }
 
-      DI bool cstr_satisfied(i_t cstr, f_t lhs) const
+      HDI bool cstr_satisfied(i_t cstr, f_t lhs) const
       {
         f_t cstr_tolerance = get_cstr_tolerance<i_t, f_t>(pb.constraint_lower_bounds[cstr],
                                                           pb.constraint_upper_bounds[cstr],
@@ -530,10 +578,13 @@ class fj_t {
         return excess_score(cstr, lhs) >= -cstr_tolerance;
       }
 
-      DI bool move_numerically_stable(f_t old_val, f_t new_val, f_t infeasibility) const
+      HDI bool move_numerically_stable(f_t old_val,
+                                       f_t new_val,
+                                       f_t infeasibility,
+                                       f_t total_violations) const
       {
         return fabs(new_val - old_val) < 1e6 && fabs(new_val) < 1e20 &&
-               fabs(*violation_score - infeasibility) < 1e20;
+               fabs(total_violations - infeasibility) < 1e20;
       }
 
       DI bool admits_move(i_t var_idx) const
@@ -545,6 +596,8 @@ class fj_t {
         if ((delta < 0 && iter < tabu_nodec_until[var_idx]) ||
             (delta > 0 && iter < tabu_noinc_until[var_idx]))
           return false;
+
+        if (*handle_fractionals_only && !fractional_variables.contains(var_idx)) return false;
 
         // give priority to MTM moves.
         if (jump_move_scores[var_idx].base > 0) return true;

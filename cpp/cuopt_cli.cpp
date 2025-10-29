@@ -18,8 +18,8 @@
 #include <cuopt/linear_programming/mip/solver_settings.hpp>
 #include <cuopt/linear_programming/optimization_problem.hpp>
 #include <cuopt/linear_programming/solve.hpp>
-#include <cuopt/logger.hpp>
 #include <mps_parser/parser.hpp>
+#include <utilities/logger.hpp>
 
 #include <raft/core/handle.hpp>
 
@@ -35,6 +35,8 @@
 #include <math_optimization/solution_reader.hpp>
 
 #include <cuopt/version_config.hpp>
+
+static char cuda_module_loading_env[] = "CUDA_MODULE_LOADING=EAGER";
 
 /**
  * @file cuopt_cli.cpp
@@ -74,6 +76,18 @@
 inline auto make_async() { return std::make_shared<rmm::mr::cuda_async_memory_resource>(); }
 
 /**
+ * @brief Handle logger when error happens before logger is initialized
+ * @param settings Solver settings
+ * @return cuopt::init_logger_t
+ */
+inline cuopt::init_logger_t dummy_logger(
+  const cuopt::linear_programming::solver_settings_t<int, double>& settings)
+{
+  return cuopt::init_logger_t(settings.get_parameter<std::string>(CUOPT_LOG_FILE),
+                              settings.get_parameter<bool>(CUOPT_LOG_TO_CONSOLE));
+}
+
+/**
  * @brief Run a single file
  * @param file_path Path to the MPS format input file containing the optimization problem
  * @param initial_solution_file Path to initial solution file in SOL format
@@ -92,6 +106,7 @@ int run_single_file(const std::string& file_path,
       settings.set_parameter_from_string(key, val);
     }
   } catch (const std::exception& e) {
+    auto log = dummy_logger(settings);
     CUOPT_LOG_ERROR("Error: %s", e.what());
     return -1;
   }
@@ -102,7 +117,7 @@ int run_single_file(const std::string& file_path,
   cuopt::mps_parser::mps_data_model_t<int, double> mps_data_model;
   bool parsing_failed = false;
   {
-    CUOPT_LOG_INFO("Running file %s", base_filename.c_str());
+    CUOPT_LOG_INFO("Reading file %s", base_filename.c_str());
     try {
       mps_data_model = cuopt::mps_parser::parse_mps<int, double>(file_path, input_mps_strict);
     } catch (const std::logic_error& e) {
@@ -111,6 +126,7 @@ int run_single_file(const std::string& file_path,
     }
   }
   if (parsing_failed) {
+    auto log = dummy_logger(settings);
     CUOPT_LOG_ERROR("Parsing MPS failed. Exiting!");
     return -1;
   }
@@ -120,35 +136,46 @@ int run_single_file(const std::string& file_path,
 
   const bool is_mip =
     (op_problem.get_problem_category() == cuopt::linear_programming::problem_category_t::MIP ||
-     op_problem.get_problem_category() == cuopt::linear_programming::problem_category_t::IP);
-
-  bool sol_found = false;
-  double obj_val = std::numeric_limits<double>::infinity();
-
-  auto initial_solution =
-    initial_solution_file.empty()
-      ? std::vector<double>()
-      : cuopt::linear_programming::solution_reader_t::get_variable_values_from_sol_file(
-          initial_solution_file, mps_data_model.get_variable_names());
+     op_problem.get_problem_category() == cuopt::linear_programming::problem_category_t::IP) &&
+    !solve_relaxation;
 
   try {
-    if (is_mip && !solve_relaxation) {
+    auto initial_solution =
+      initial_solution_file.empty()
+        ? std::vector<double>()
+        : cuopt::linear_programming::solution_reader_t::get_variable_values_from_sol_file(
+            initial_solution_file, mps_data_model.get_variable_names());
+
+    if (is_mip) {
       auto& mip_settings = settings.get_mip_settings();
       if (initial_solution.size() > 0) {
-        mip_settings.set_initial_solution(initial_solution.data(), initial_solution.size());
+        mip_settings.add_initial_solution(initial_solution.data(), initial_solution.size());
       }
-      auto solution = cuopt::linear_programming::solve_mip(op_problem, mip_settings);
     } else {
       auto& lp_settings = settings.get_pdlp_settings();
       if (initial_solution.size() > 0) {
         lp_settings.set_initial_primal_solution(initial_solution.data(), initial_solution.size());
       }
-      auto solution = cuopt::linear_programming::solve_lp(op_problem, lp_settings);
+    }
+  } catch (const std::exception& e) {
+    auto log = dummy_logger(settings);
+    CUOPT_LOG_ERROR("Error: %s", e.what());
+    return -1;
+  }
+
+  try {
+    if (is_mip) {
+      auto& mip_settings = settings.get_mip_settings();
+      auto solution      = cuopt::linear_programming::solve_mip(op_problem, mip_settings);
+    } else {
+      auto& lp_settings = settings.get_pdlp_settings();
+      auto solution     = cuopt::linear_programming::solve_lp(op_problem, lp_settings);
     }
   } catch (const std::exception& e) {
     CUOPT_LOG_ERROR("Error: %s", e.what());
     return -1;
   }
+
   return 0;
 }
 
@@ -169,6 +196,50 @@ std::string param_name_to_arg_name(const std::string& input)
 }
 
 /**
+ * @brief Set the CUDA module loading environment variable
+ * If the method is 0, set the CUDA module loading environment variable to EAGER
+ * This needs to be done before the first call to the CUDA API. In this file before dummy settings
+ * default constructor is called.
+ * @param argc Number of command line arguments
+ * @param argv Command line arguments
+ * @return 0 on success, 1 on failure
+ */
+int set_cuda_module_loading(int argc, char* argv[])
+{
+  // Parse method_int from argv
+  int method_int = 0;  // Default value
+  for (int i = 1; i < argc; ++i) {
+    std::string arg = argv[i];
+    if ((arg == "--method" || arg == "-m") && i + 1 < argc) {
+      try {
+        method_int = std::stoi(argv[i + 1]);
+      } catch (...) {
+        std::cerr << "Invalid value for --method: " << argv[i + 1] << std::endl;
+        return 1;
+      }
+      break;
+    }
+    // Also support --method=1 style
+    if (arg.rfind("--method=", 0) == 0) {
+      try {
+        method_int = std::stoi(arg.substr(9));
+      } catch (...) {
+        std::cerr << "Invalid value for --method: " << arg << std::endl;
+        return 1;
+      }
+      break;
+    }
+  }
+
+  char* env_val = getenv("CUDA_MODULE_LOADING");
+  if (method_int == 0 && (!env_val || env_val[0] == '\0')) {
+    CUOPT_LOG_INFO("Setting CUDA_MODULE_LOADING to EAGER");
+    putenv(cuda_module_loading_env);
+  }
+  return 0;
+}
+
+/**
  * @brief Main function for the cuOpt CLI
  * @param argc Number of command line arguments
  * @param argv Command line arguments
@@ -176,10 +247,12 @@ std::string param_name_to_arg_name(const std::string& input)
  */
 int main(int argc, char* argv[])
 {
+  if (set_cuda_module_loading(argc, argv) != 0) { return 1; }
+
   // Get the version string from the version_config.hpp file
-  const auto version_string = std::string("cuOpt ") + std::to_string(CUOPT_VERSION_MAJOR) + "." +
-                              std::to_string(CUOPT_VERSION_MINOR) + "." +
-                              std::to_string(CUOPT_VERSION_PATCH);
+  const std::string version_string = std::string("cuOpt ") + std::to_string(CUOPT_VERSION_MAJOR) +
+                                     "." + std::to_string(CUOPT_VERSION_MINOR) + "." +
+                                     std::to_string(CUOPT_VERSION_PATCH);
 
   // Create the argument parser
   argparse::ArgumentParser program("cuopt_cli", version_string);
@@ -195,6 +268,11 @@ int main(int argc, char* argv[])
   program.add_argument("--relaxation")
     .help("solve the LP relaxation of the MIP")
     .default_value(false)
+    .implicit_value(true);
+
+  program.add_argument("--presolve")
+    .help("enable/disable presolve (default: true for MIP problems, false for LP problems)")
+    .default_value(true)
     .implicit_value(true);
 
   std::map<std::string, std::string> arg_name_to_param_name;
