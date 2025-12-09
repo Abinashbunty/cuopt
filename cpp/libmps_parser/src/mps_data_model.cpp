@@ -1,19 +1,9 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights
- * reserved. SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
+/* clang-format on */
 
 #include <mps_parser/mps_data_model.hpp>
 #include <utilities/error.hpp>
@@ -211,8 +201,8 @@ void mps_data_model_t<i_t, f_t>::set_quadratic_objective_matrix(const f_t* Q_val
     mps_parser_expects(
       Q_values != nullptr, error_type_t::ValidationError, "Q_values cannot be null");
   }
-  Q_objective_.resize(size_values);
-  std::copy(Q_values, Q_values + size_values, Q_objective_.data());
+  Q_objective_values_.resize(size_values);
+  std::copy(Q_values, Q_values + size_values, Q_objective_values_.data());
 
   if (size_indices != 0) {
     mps_parser_expects(
@@ -431,13 +421,13 @@ i_t mps_data_model_t<i_t, f_t>::get_nnz() const
 template <typename i_t, typename f_t>
 const std::vector<f_t>& mps_data_model_t<i_t, f_t>::get_quadratic_objective_values() const
 {
-  return Q_objective_;
+  return Q_objective_values_;
 }
 
 template <typename i_t, typename f_t>
 std::vector<f_t>& mps_data_model_t<i_t, f_t>::get_quadratic_objective_values()
 {
-  return Q_objective_;
+  return Q_objective_values_;
 }
 
 template <typename i_t, typename f_t>
@@ -467,7 +457,7 @@ std::vector<i_t>& mps_data_model_t<i_t, f_t>::get_quadratic_objective_offsets()
 template <typename i_t, typename f_t>
 bool mps_data_model_t<i_t, f_t>::has_quadratic_objective() const noexcept
 {
-  return !Q_objective_.empty();
+  return !Q_objective_values_.empty();
 }
 
 // NOTE: Explicitly instantiate all types here in order to avoid linker error

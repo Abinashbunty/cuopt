@@ -1,19 +1,9 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
+/* clang-format on */
 
 #include <cuopt/error.hpp>
 #include <mip/mip_constants.hpp>
@@ -195,7 +185,9 @@ papilo::Problem<f_t> build_papilo_problem(const optimization_problem_t<i_t, f_t>
 
 template <typename i_t, typename f_t>
 optimization_problem_t<i_t, f_t> build_optimization_problem(
-  papilo::Problem<f_t> const& papilo_problem, raft::handle_t const* handle_ptr)
+  papilo::Problem<f_t> const& papilo_problem,
+  raft::handle_t const* handle_ptr,
+  problem_category_t category)
 {
   raft::common::nvtx::range fun_scope("Build optimization problem");
   optimization_problem_t<i_t, f_t> op_problem(handle_ptr);
@@ -203,6 +195,7 @@ optimization_problem_t<i_t, f_t> build_optimization_problem(
   auto obj = papilo_problem.getObjective();
   op_problem.set_objective_offset(maximize_ ? -obj.offset : obj.offset);
   op_problem.set_maximize(maximize_);
+  op_problem.set_problem_category(category);
 
   if (papilo_problem.getNRows() == 0 && papilo_problem.getNCols() == 0) {
     // FIXME: Shouldn't need to set offsets
@@ -436,7 +429,7 @@ std::optional<third_party_presolve_result_t<i_t, f_t>> third_party_presolve_t<i_
                  papilo_problem.getConstraintMatrix().getNnz());
 
   auto opt_problem =
-    build_optimization_problem<i_t, f_t>(papilo_problem, op_problem.get_handle_ptr());
+    build_optimization_problem<i_t, f_t>(papilo_problem, op_problem.get_handle_ptr(), category);
   auto col_flags = papilo_problem.getColFlags();
   std::vector<i_t> implied_integer_indices;
   for (size_t i = 0; i < col_flags.size(); i++) {

@@ -1,17 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.  # noqa
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import pytest
 
@@ -60,7 +48,6 @@ def validate_milp_result(
 
 
 def get_std_data_for_lp():
-
     return {
         "csr_constraint_matrix": {
             "offsets": [0, 2],
@@ -98,7 +85,6 @@ def get_std_data_for_lp():
 
 
 def get_std_data_for_milp():
-
     data = get_std_data_for_lp()
     data["variable_types"] = ["I", "C"]
     data["maximize"] = True
@@ -107,7 +93,6 @@ def get_std_data_for_milp():
 
 
 def test_sample_lp(cuoptproc):  # noqa
-
     res = get_lp(client, get_std_data_for_lp())
 
     assert res.status_code == 200
@@ -129,9 +114,12 @@ def test_sample_lp(cuoptproc):  # noqa
     ],
 )
 def test_sample_milp(
-    cuoptproc, maximize, scaling, expected_status, heuristics_only  # noqa
+    cuoptproc,  # noqa
+    maximize,
+    scaling,
+    expected_status,
+    heuristics_only,
 ):
-
     data = get_std_data_for_milp()
     data["maximize"] = maximize
     data["solver_config"]["mip_scaling"] = scaling
@@ -222,4 +210,32 @@ def test_barrier_solver_options(
     validate_lp_result(
         res.json()["response"]["solver_response"],
         LPTerminationStatus.Optimal.name,
+    )
+
+
+def test_termination_status_enum_sync():
+    """
+    Ensure local status values in data_definition.py stay in sync
+    with actual LPTerminationStatus and MILPTerminationStatus enums.
+
+    The data_definition module cannot import these enums directly
+    because it triggers CUDA/RMM initialization before the server
+    has configured memory management. So we maintain local copies
+    and this test ensures they stay in sync.
+    """
+    from cuopt_server.utils.linear_programming.data_definition import (
+        LP_STATUS_NAMES,
+        MILP_STATUS_NAMES,
+    )
+
+    expected_lp = {e.name for e in LPTerminationStatus}
+    expected_milp = {e.name for e in MILPTerminationStatus}
+
+    assert LP_STATUS_NAMES == expected_lp, (
+        f"LP_STATUS_NAMES out of sync with LPTerminationStatus enum. "
+        f"Expected: {expected_lp}, Got: {LP_STATUS_NAMES}"
+    )
+    assert MILP_STATUS_NAMES == expected_milp, (
+        f"MILP_STATUS_NAMES out of sync with MILPTerminationStatus enum. "
+        f"Expected: {expected_milp}, Got: {MILP_STATUS_NAMES}"
     )

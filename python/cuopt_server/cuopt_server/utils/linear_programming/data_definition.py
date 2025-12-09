@@ -1,17 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.  # noqa
+# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import copy
 import json
@@ -317,18 +305,16 @@ class InitialSolution(StrictModel):
     Initial solution for the solver.
     """
 
-    primal: Optional[
-        Annotated[List[float], PlainValidator(listfloat)]
-    ] = Field(
-        default=None,
-        description="Initial primal solution",
-        json_schema_extra=addfloat,
+    primal: Optional[Annotated[List[float], PlainValidator(listfloat)]] = (
+        Field(
+            default=None,
+            description="Initial primal solution",
+            json_schema_extra=addfloat,
+        )
     )
     dual: Optional[Annotated[List[float], PlainValidator(listfloat)]] = Field(
         default=None,
-        description="Initial dual solution"
-        "<br>"
-        "Note: Not supported for MILP. ",
+        description="Initial dual solution<br>Note: Not supported for MILP. ",
         json_schema_extra=addfloat,
     )
 
@@ -343,45 +329,42 @@ class Tolerances(StrictModel):
     )
     absolute_dual_tolerance: float = Field(
         default=None,
-        description="Absolute dual tolerance" "NOTE: Only applicable to LP",
+        description="Absolute dual tolerance NOTE: Only applicable to LP",
     )
     absolute_gap_tolerance: float = Field(
         default=None,
-        description="Absolute gap tolerance" "NOTE: Only applicable to LP",
+        description="Absolute gap tolerance NOTE: Only applicable to LP",
     )
     relative_primal_tolerance: float = Field(
         default=None, description="Relative primal tolerance"
     )
     relative_dual_tolerance: float = Field(
         default=None,
-        description="Relative dual tolerance" "NOTE: Only applicable to LP",
+        description="Relative dual tolerance NOTE: Only applicable to LP",
     )
     relative_gap_tolerance: float = Field(
         default=None,
-        description="Relative gap tolerance" "NOTE: Only applicable to LP",
+        description="Relative gap tolerance NOTE: Only applicable to LP",
     )
     primal_infeasible_tolerance: float = Field(
         default=None,
-        description="Primal infeasible tolerance"
-        "NOTE: Only applicable to LP",
+        description="Primal infeasible tolerance NOTE: Only applicable to LP",
     )
     dual_infeasible_tolerance: float = Field(
         default=None,
-        description="Dual infeasible tolerance" "NOTE: Only applicable to LP",
+        description="Dual infeasible tolerance NOTE: Only applicable to LP",
     )
     mip_integrality_tolerance: float = Field(
         default=None,
-        description="NOTE: Only applicable to MILP." "Integrality tolerance.",
+        description="NOTE: Only applicable to MILP. Integrality tolerance.",
     )
     mip_absolute_gap: float = Field(
         default=None,
-        description="MIP gap absolute tolerance"
-        "NOTE: Only applicable to MILP",
+        description="MIP gap absolute tolerance NOTE: Only applicable to MILP",
     )
     mip_relative_gap: float = Field(
         default=None,
-        description="MIP gap relative tolerance"
-        "NOTE: Only applicable to MILP",
+        description="MIP gap relative tolerance NOTE: Only applicable to MILP",
     )
     mip_absolute_tolerance: float = Field(
         default=None, description="MIP absolute tolerance"
@@ -398,14 +381,12 @@ class Tolerances(StrictModel):
     absolute_dual: float = Field(
         default=None,
         deprecated=True,
-        description="Deprecated in 25.08. "
-        "Use absolute_dual_tolerance instead",
+        description="Deprecated in 25.08. Use absolute_dual_tolerance instead",
     )
     absolute_gap: float = Field(
         default=None,
         deprecated=True,
-        description="Deprecated in 25.08. "
-        "Use absolute_gap_tolerance instead",
+        description="Deprecated in 25.08. Use absolute_gap_tolerance instead",
     )
     relative_primal: float = Field(
         default=None,
@@ -416,14 +397,12 @@ class Tolerances(StrictModel):
     relative_dual: float = Field(
         default=None,
         deprecated=True,
-        description="Deprecated in 25.08. "
-        "Use relative_dual_tolerance instead",
+        description="Deprecated in 25.08. Use relative_dual_tolerance instead",
     )
     relative_gap: float = Field(
         default=None,
         deprecated=True,
-        description="Deprecated in 25.08. "
-        "Use relative_gap_tolerance instead",
+        description="Deprecated in 25.08. Use relative_gap_tolerance instead",
     )
     primal_infeasible: float = Field(
         default=None,
@@ -536,6 +515,10 @@ class SolverConfig(StrictModel):
     num_cpu_threads: Optional[int] = Field(
         default=None,
         description="Set the number of CPU threads to use for branch and bound.",  # noqa
+    )
+    num_gpus: Optional[int] = Field(
+        default=None,
+        description="Set the number of GPUs to use for LP solve.",
     )
     augmented: Optional[int] = Field(
         default=-1,
@@ -707,20 +690,22 @@ class LPData(StrictModel):
         description="If set to True, solver tries to maximize "
         "objective function else it will try to minimize",
     )
-    variable_types: Optional[
-        Annotated[List[str], PlainValidator(liststr)]
-    ] = Field(
-        default=None,
-        description="Type of each variable, this is must for MILP,"
-        "Available options are, "
-        "'I' - Integer"
-        "'C' - Continuous",
-        json_schema_extra=addstr,
+    variable_types: Optional[Annotated[List[str], PlainValidator(liststr)]] = (
+        Field(
+            default=None,
+            description="Type of each variable, this is must for MILP,"
+            "Available options are, "
+            "'I' - Integer"
+            "'C' - Continuous",
+            json_schema_extra=addstr,
+        )
     )
-    variable_names: Optional[
-        Annotated[List[str], PlainValidator(liststr)]
-    ] = Field(
-        default=None, description="Name of variables", json_schema_extra=addstr
+    variable_names: Optional[Annotated[List[str], PlainValidator(liststr)]] = (
+        Field(
+            default=None,
+            description="Name of variables",
+            json_schema_extra=addstr,
+        )
     )
     solver_config: Optional[SolverConfig] = Field(
         default=SolverConfig(),
@@ -767,7 +752,6 @@ class WarmStartData(StrictModel):
 
 
 class SolutionData(StrictModel):
-
     problem_category: int = Field(
         default=None, description=("Category of the solution, LP-0/MIP-1/IP-2")
     )
@@ -778,8 +762,7 @@ class SolutionData(StrictModel):
     dual_solution: List[float] = Field(
         default=[],
         description=(
-            "Note: Only applicable to LP \n"
-            "Dual solution of the LP problem\n"
+            "Note: Only applicable to LP \nDual solution of the LP problem\n"
         ),
     )
     solver_time: float = Field(
@@ -799,8 +782,7 @@ class SolutionData(StrictModel):
     dual_objective: float = Field(
         default=None,
         description=(
-            "Note: Only applicable to LP \n"
-            "Dual objective of the LP problem \n"
+            "Note: Only applicable to LP \nDual objective of the LP problem \n"
         ),
     )
     vars: Dict = Field(
@@ -828,27 +810,77 @@ class SolutionData(StrictModel):
     )
 
 
+# LP termination status values
+# NOTE: These must match LPTerminationStatus from
+# cuopt.linear_programming.solver.solver_wrapper
+# We cannot import them directly because it triggers CUDA/RMM initialization
+# before the server has configured memory management.
+# See test_termination_status_enum_sync() in test_lp.py to ensure these stay in sync.
+LP_STATUS_NAMES = frozenset(
+    {
+        "NoTermination",
+        "NumericalError",
+        "Optimal",
+        "PrimalInfeasible",
+        "DualInfeasible",
+        "IterationLimit",
+        "TimeLimit",
+        "PrimalFeasible",
+    }
+)
+
+# MILP termination status values
+# NOTE: These must match MILPTerminationStatus from
+# cuopt.linear_programming.solver.solver_wrapper
+MILP_STATUS_NAMES = frozenset(
+    {
+        "NoTermination",
+        "Optimal",
+        "FeasibleFound",
+        "Infeasible",
+        "Unbounded",
+        "TimeLimit",
+    }
+)
+
+# Combined set of all valid status names
+ALL_STATUS_NAMES = LP_STATUS_NAMES | MILP_STATUS_NAMES
+
+
+def validate_termination_status(v):
+    """Validate that status is a valid LP or MILP termination status name."""
+    if v not in ALL_STATUS_NAMES:
+        raise ValueError(
+            f"status must be one of {sorted(ALL_STATUS_NAMES)}, got '{v}'"
+        )
+    return v
+
+
 class SolutionResultData(StrictModel):
-    status: int = Field(
-        default=0,
-        examples=[1],
-        description=(
-            "In case of LP : \n\n"
-            "0 - No Termination \n\n"
-            "1 - Optimal solution is available \n\n"
-            "2 - Primal Infeasible solution \n\n"
-            "3 - Dual Infeasible solution \n\n"
-            "4 - Iteration Limit reached \n\n"
-            "5 - TimeLimit reached \n\n"
-            "6 - Primal Feasible \n\n"
-            "---------------------- \n\n"
-            "In case of MILP/IP : \n\n"
-            "0 - No Termination \n\n"
-            "1 - Optimal solution is available \n\n"
-            "2 - Feasible solution is available \n\n"
-            "3 - Infeasible \n\n"
-            "4 - Unbounded\n\n"
-        ),
+    status: Annotated[str, PlainValidator(validate_termination_status)] = (
+        Field(
+            default="NoTermination",
+            examples=["Optimal"],
+            description=(
+                "In case of LP : \n\n"
+                "NoTermination - No Termination \n\n"
+                "NumericalError - Numerical Error \n\n"
+                "Optimal - Optimal solution is available \n\n"
+                "PrimalInfeasible - Primal Infeasible solution \n\n"
+                "DualInfeasible - Dual Infeasible solution \n\n"
+                "IterationLimit - Iteration Limit reached \n\n"
+                "TimeLimit - TimeLimit reached \n\n"
+                "PrimalFeasible - Primal Feasible \n\n"
+                "---------------------- \n\n"
+                "In case of MILP/IP : \n\n"
+                "NoTermination - No Termination \n\n"
+                "Optimal - Optimal solution is available \n\n"
+                "FeasibleFound - Feasible solution is available \n\n"
+                "Infeasible - Infeasible \n\n"
+                "Unbounded - Unbounded \n\n"
+                "TimeLimit - TimeLimit reached \n\n"
+            ),
+        )
     )
     solution: SolutionData = Field(
         default=SolutionData(), description=("Solution of the LP problem")
@@ -856,9 +888,9 @@ class SolutionResultData(StrictModel):
 
 
 class LPSolve(StrictModel):
-    solver_response: Union[
-        SolutionResultData, List[SolutionResultData]
-    ] = Field(default=SolutionResultData(), description="LP solution")
+    solver_response: Union[SolutionResultData, List[SolutionResultData]] = (
+        Field(default=SolutionResultData(), description="LP solution")
+    )
     perf_times: Optional[Dict] = Field(
         default=None, description=("Etl and Solve times of the solve call")
     )
@@ -914,7 +946,7 @@ lp_response = {
     "value": {
         "response": {
             "solver_response": {
-                "status": 1,
+                "status": "Optimal",
                 "solution": {
                     "problem_category": 0,
                     "primal_solution": [0.0, 0.0],
@@ -943,7 +975,7 @@ milp_response = {
     "value": {
         "response": {
             "solver_response": {
-                "status": 2,
+                "status": "FeasibleFound",
                 "solution": {
                     "problem_category": 1,
                     "primal_solution": [0.0, 0.0],
@@ -974,7 +1006,7 @@ milp_response = {
     "value": {
         "response": {
             "solver_response": {
-                "status": 2,
+                "status": "FeasibleFound",
                 "solution": {
                     "problem_category": 1,
                     "primal_solution": [0.0, 0.0],

@@ -1,17 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.  # noqa
+# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 import logging
 import os
@@ -48,6 +36,7 @@ from cuopt.linear_programming.solver.solver_parameters import (
     CUOPT_MIP_RELATIVE_TOLERANCE,
     CUOPT_MIP_SCALING,
     CUOPT_NUM_CPU_THREADS,
+    CUOPT_NUM_GPUS,
     CUOPT_ORDERING,
     CUOPT_PDLP_SOLVER_MODE,
     CUOPT_PER_CONSTRAINT_RESIDUAL,
@@ -103,7 +92,6 @@ def warn_on_objectives(solver_config):
 
 
 def create_data_model(LP_data):
-
     warnings = []
 
     # Create data model object
@@ -382,6 +370,10 @@ def create_solver(LP_data, warmstart_data):
             solver_settings.set_parameter(
                 CUOPT_NUM_CPU_THREADS, solver_config.num_cpu_threads
             )
+        if solver_config.num_gpus is not None:
+            solver_settings.set_parameter(
+                CUOPT_NUM_GPUS, solver_config.num_gpus
+            )
         if solver_config.crossover is not None:
             solver_settings.set_parameter(
                 CUOPT_CROSSOVER, solver_config.crossover
@@ -532,7 +524,6 @@ def solve(LP_data, reqId, intermediate_sender, warmstart_data):
             MILPTerminationStatus.Optimal,
             MILPTerminationStatus.FeasibleFound,
         ):
-
             primal_solution = get_if_attribute_is_valid_else_none(
                 sol.get_primal_solution
             )

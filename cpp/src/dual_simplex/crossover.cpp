@@ -1,19 +1,9 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
+/* clang-format on */
 
 #include <dual_simplex/crossover.hpp>
 
@@ -1214,6 +1204,7 @@ crossover_status_t crossover(const lp_problem_t<i_t, f_t>& lp,
       lp, settings, start_time, solution, ft, basic_list, nonbasic_list, superbasic_list, vstatus);
     if (primal_push_status < 0) { return return_to_status(primal_push_status); }
     print_crossover_info(lp, settings, vstatus, solution, "Primal push complete");
+    compute_dual_solution_from_basis(lp, ft, basic_list, nonbasic_list, solution.y, solution.z);
   } else {
     settings.log.printf("No primal push needed. No superbasic variables\n");
   }
@@ -1396,7 +1387,10 @@ crossover_status_t crossover(const lp_problem_t<i_t, f_t>& lp,
   crossover_status_t status = crossover_status_t::NUMERICAL_ISSUES;
   if (dual_feasible) { status = crossover_status_t::DUAL_FEASIBLE; }
   if (primal_feasible) { status = crossover_status_t::PRIMAL_FEASIBLE; }
-  if (primal_feasible && dual_feasible) { status = crossover_status_t::OPTIMAL; }
+  if (primal_feasible && dual_feasible) {
+    status = crossover_status_t::OPTIMAL;
+    if (settings.concurrent_halt != nullptr) { *settings.concurrent_halt = 1; }
+  }
   return status;
 }
 

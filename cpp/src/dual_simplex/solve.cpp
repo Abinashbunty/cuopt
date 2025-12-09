@@ -1,19 +1,9 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
+/* clang-format on */
 
 #include <dual_simplex/solve.hpp>
 
@@ -117,6 +107,35 @@ lp_status_t solve_linear_program_advanced(const lp_problem_t<i_t, f_t>& original
                                           std::vector<variable_status_t>& vstatus,
                                           std::vector<f_t>& edge_norms)
 {
+  const i_t m = original_lp.num_rows;
+  const i_t n = original_lp.num_cols;
+  assert(m <= n);
+  std::vector<i_t> basic_list(m);
+  std::vector<i_t> nonbasic_list;
+  basis_update_mpf_t<i_t, f_t> ft(m, settings.refactor_frequency);
+  return solve_linear_program_with_advanced_basis(original_lp,
+                                                  start_time,
+                                                  settings,
+                                                  original_solution,
+                                                  ft,
+                                                  basic_list,
+                                                  nonbasic_list,
+                                                  vstatus,
+                                                  edge_norms);
+}
+
+template <typename i_t, typename f_t>
+lp_status_t solve_linear_program_with_advanced_basis(
+  const lp_problem_t<i_t, f_t>& original_lp,
+  const f_t start_time,
+  const simplex_solver_settings_t<i_t, f_t>& settings,
+  lp_solution_t<i_t, f_t>& original_solution,
+  basis_update_mpf_t<i_t, f_t>& ft,
+  std::vector<i_t>& basic_list,
+  std::vector<i_t>& nonbasic_list,
+  std::vector<variable_status_t>& vstatus,
+  std::vector<f_t>& edge_norms)
+{
   lp_status_t lp_status = lp_status_t::UNSET;
   lp_problem_t<i_t, f_t> presolved_lp(original_lp.handle_ptr, 1, 1, 1);
   presolve_info_t<i_t, f_t> presolve_info;
@@ -160,9 +179,9 @@ lp_status_t solve_linear_program_advanced(const lp_problem_t<i_t, f_t>& original
   assert(num_basic == phase1_problem.num_rows);
   i_t iter = 0;
   lp_solution_t<i_t, f_t> phase1_solution(phase1_problem.num_rows, phase1_problem.num_cols);
-  std::vector<f_t> junk;
+  edge_norms.clear();
   dual::status_t phase1_status = dual_phase2(
-    1, 1, start_time, phase1_problem, settings, phase1_vstatus, phase1_solution, iter, junk);
+    1, 1, start_time, phase1_problem, settings, phase1_vstatus, phase1_solution, iter, edge_norms);
   if (phase1_status == dual::status_t::NUMERICAL ||
       phase1_status == dual::status_t::DUAL_UNBOUNDED) {
     settings.log.printf("Failed in Phase 1\n");
@@ -179,25 +198,54 @@ lp_status_t solve_linear_program_advanced(const lp_problem_t<i_t, f_t>& original
     assert(solution.x.size() == lp.num_cols);
     vstatus = phase1_vstatus;
     edge_norms.clear();
-    dual::status_t status = dual_phase2(
-      2, iter == 0 ? 1 : 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+    bool initialize_basis_update = true;
+    dual::status_t status        = dual_phase2_with_advanced_basis(2,
+                                                            iter == 0 ? 1 : 0,
+                                                            initialize_basis_update,
+                                                            start_time,
+                                                            lp,
+                                                            settings,
+                                                            vstatus,
+                                                            ft,
+                                                            basic_list,
+                                                            nonbasic_list,
+                                                            solution,
+                                                            iter,
+                                                            edge_norms);
     if (status == dual::status_t::NUMERICAL) {
       // Became dual infeasible. Try phase 1 again
       phase1_vstatus = vstatus;
       settings.log.printf("Running Phase 1 again\n");
-      junk.clear();
-      dual_phase2(1,
-                  0,
-                  start_time,
-                  phase1_problem,
-                  settings,
-                  phase1_vstatus,
-                  phase1_solution,
-                  iter,
-                  edge_norms);
+      edge_norms.clear();
+      initialize_basis_update = false;
+      dual_phase2_with_advanced_basis(1,
+                                      0,
+                                      initialize_basis_update,
+                                      start_time,
+                                      phase1_problem,
+                                      settings,
+                                      phase1_vstatus,
+                                      ft,
+                                      basic_list,
+                                      nonbasic_list,
+                                      phase1_solution,
+                                      iter,
+                                      edge_norms);
       vstatus = phase1_vstatus;
       edge_norms.clear();
-      status = dual_phase2(2, 0, start_time, lp, settings, vstatus, solution, iter, edge_norms);
+      status = dual_phase2_with_advanced_basis(2,
+                                               0,
+                                               initialize_basis_update,
+                                               start_time,
+                                               lp,
+                                               settings,
+                                               vstatus,
+                                               ft,
+                                               basic_list,
+                                               nonbasic_list,
+                                               solution,
+                                               iter,
+                                               edge_norms);
     }
     constexpr bool primal_cleanup = false;
     if (status == dual::status_t::OPTIMAL && primal_cleanup) {
@@ -278,6 +326,24 @@ lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& us
 
   // Solve using barrier
   lp_solution_t<i_t, f_t> barrier_solution(barrier_lp.num_rows, barrier_lp.num_cols);
+
+  // Clear variable pairs for QP
+  if (barrier_lp.Q.n > 0) {
+    const i_t num_free_variables = presolve_info.free_variable_pairs.size() / 2;
+    for (i_t k = 0; k < num_free_variables; k++) {
+      i_t u = presolve_info.free_variable_pairs[2 * k];
+      i_t v = presolve_info.free_variable_pairs[2 * k + 1];
+
+      const i_t row_start_u = barrier_lp.Q.row_start[u];
+      const i_t row_end_u   = barrier_lp.Q.row_start[u + 1];
+      const i_t row_start_v = barrier_lp.Q.row_start[v];
+      const i_t row_end_v   = barrier_lp.Q.row_start[v + 1];
+      if (row_end_u - row_start_u == 0 && row_end_v - row_start_v == 0) {
+        settings.log.printf("Free variable pair %d-%d has no quadratic term\n", u, v);
+      }
+    }
+  }
+
   barrier_solver_t<i_t, f_t> barrier_solver(barrier_lp, presolve_info, barrier_settings);
   barrier_solver_settings_t<i_t, f_t> barrier_solver_settings;
   lp_status_t barrier_status =
@@ -310,18 +376,19 @@ lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& us
     settings.log.printf("Unscaled Primal infeasibility   (abs/rel): %.2e/%.2e\n",
                         primal_residual,
                         primal_residual / (1.0 + vector_norm_inf<i_t, f_t>(presolved_lp.rhs)));
-
-    std::vector<f_t> unscaled_dual_residual = unscaled_z;
-    for (i_t j = 0; j < unscaled_dual_residual.size(); ++j) {
-      unscaled_dual_residual[j] -= presolved_lp.objective[j];
+    if (barrier_lp.Q.n == 0) {
+      std::vector<f_t> unscaled_dual_residual = unscaled_z;
+      for (i_t j = 0; j < unscaled_dual_residual.size(); ++j) {
+        unscaled_dual_residual[j] -= presolved_lp.objective[j];
+      }
+      matrix_transpose_vector_multiply(
+        presolved_lp.A, 1.0, barrier_solution.y, 1.0, unscaled_dual_residual);
+      f_t unscaled_dual_residual_norm = vector_norm_inf<i_t, f_t>(unscaled_dual_residual);
+      settings.log.printf(
+        "Unscaled Dual infeasibility     (abs/rel): %.2e/%.2e\n",
+        unscaled_dual_residual_norm,
+        unscaled_dual_residual_norm / (1.0 + vector_norm_inf<i_t, f_t>(presolved_lp.objective)));
     }
-    matrix_transpose_vector_multiply(
-      presolved_lp.A, 1.0, barrier_solution.y, 1.0, unscaled_dual_residual);
-    f_t unscaled_dual_residual_norm = vector_norm_inf<i_t, f_t>(unscaled_dual_residual);
-    settings.log.printf(
-      "Unscaled Dual infeasibility     (abs/rel): %.2e/%.2e\n",
-      unscaled_dual_residual_norm,
-      unscaled_dual_residual_norm / (1.0 + vector_norm_inf<i_t, f_t>(presolved_lp.objective)));
 
     // Undo presolve
     uncrush_solution(presolve_info,
@@ -341,17 +408,19 @@ lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& us
       post_solve_primal_residual,
       post_solve_primal_residual / (1.0 + vector_norm_inf<i_t, f_t>(original_lp.rhs)));
 
-    std::vector<f_t> post_solve_dual_residual = lp_solution.z;
-    for (i_t j = 0; j < post_solve_dual_residual.size(); ++j) {
-      post_solve_dual_residual[j] -= original_lp.objective[j];
+    if (barrier_lp.Q.n == 0) {
+      std::vector<f_t> post_solve_dual_residual = lp_solution.z;
+      for (i_t j = 0; j < post_solve_dual_residual.size(); ++j) {
+        post_solve_dual_residual[j] -= original_lp.objective[j];
+      }
+      matrix_transpose_vector_multiply(
+        original_lp.A, 1.0, lp_solution.y, 1.0, post_solve_dual_residual);
+      f_t post_solve_dual_residual_norm = vector_norm_inf<i_t, f_t>(post_solve_dual_residual);
+      settings.log.printf(
+        "Post-solve Dual infeasibility   (abs/rel): %.2e/%.2e\n",
+        post_solve_dual_residual_norm,
+        post_solve_dual_residual_norm / (1.0 + vector_norm_inf<i_t, f_t>(original_lp.objective)));
     }
-    matrix_transpose_vector_multiply(
-      original_lp.A, 1.0, lp_solution.y, 1.0, post_solve_dual_residual);
-    f_t post_solve_dual_residual_norm = vector_norm_inf<i_t, f_t>(post_solve_dual_residual);
-    settings.log.printf(
-      "Post-solve Dual infeasibility   (abs/rel): %.2e/%.2e\n",
-      post_solve_dual_residual_norm,
-      post_solve_dual_residual_norm / (1.0 + vector_norm_inf<i_t, f_t>(original_lp.objective)));
 
     if (dualize_info.solving_dual) {
       lp_solution_t<i_t, f_t> primal_solution(dualize_info.primal_problem.num_rows,
@@ -433,7 +502,7 @@ lp_status_t solve_linear_program_with_barrier(const user_problem_t<i_t, f_t>& us
   }
 
   // If we aren't doing crossover, we're done
-  if (!settings.crossover) { return barrier_status; }
+  if (!settings.crossover || barrier_lp.Q.n > 0) { return barrier_status; }
 
   if (settings.crossover && barrier_status == lp_status_t::OPTIMAL) {
     // Check to see if we need to add artifical variables
@@ -599,6 +668,17 @@ template lp_status_t solve_linear_program_advanced(
   const double start_time,
   const simplex_solver_settings_t<int, double>& settings,
   lp_solution_t<int, double>& original_solution,
+  std::vector<variable_status_t>& vstatus,
+  std::vector<double>& edge_norms);
+
+template lp_status_t solve_linear_program_with_advanced_basis(
+  const lp_problem_t<int, double>& original_lp,
+  const double start_time,
+  const simplex_solver_settings_t<int, double>& settings,
+  lp_solution_t<int, double>& original_solution,
+  basis_update_mpf_t<int, double>& ft,
+  std::vector<int>& basic_list,
+  std::vector<int>& nonbasic_list,
   std::vector<variable_status_t>& vstatus,
   std::vector<double>& edge_norms);
 

@@ -1,17 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.  # noqa
+# SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 from enum import IntEnum, auto
 
@@ -42,6 +30,7 @@ from cuopt.linear_programming.solver.solver_parameters import (
     CUOPT_MIP_RELATIVE_TOLERANCE,
     CUOPT_MIP_SCALING,
     CUOPT_NUM_CPU_THREADS,
+    CUOPT_NUM_GPUS,
     CUOPT_ORDERING,
     CUOPT_PDLP_SOLVER_MODE,
     CUOPT_PER_CONSTRAINT_RESIDUAL,
@@ -330,7 +319,6 @@ class SolverSettings:
         return self.pdlp_warm_start_data
 
     def toDict(self):
-
         time_limit = self.get_parameter(CUOPT_TIME_LIMIT)
         if time_limit == float("inf"):
             time_limit = None
@@ -387,6 +375,7 @@ class SolverSettings:
                 CUOPT_MIP_HEURISTICS_ONLY
             ),
             "num_cpu_threads": self.get_parameter(CUOPT_NUM_CPU_THREADS),
+            "num_gpus": self.get_parameter(CUOPT_NUM_GPUS),
             "augmented": self.get_parameter(CUOPT_AUGMENTED),
             "folding": self.get_parameter(CUOPT_FOLDING),
             "dualize": self.get_parameter(CUOPT_DUALIZE),

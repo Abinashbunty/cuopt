@@ -1,19 +1,9 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
- * All rights reserved. SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
+/* clang-format on */
 
 #pragma once
 
@@ -23,6 +13,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 namespace cuopt::linear_programming::dual_simplex {
@@ -57,6 +48,7 @@ class csc_matrix_t {
   // Adjust to i and x vectors for a new number of nonzeros
   void reallocate(i_t new_nz);
 
+  i_t nnz() const { return col_start[n]; }
   // Convert the CSC matrix to a CSR matrix
   i_t to_compressed_row(
     cuopt::linear_programming::dual_simplex::csr_matrix_t<i_t, f_t>& Arow) const;
@@ -103,7 +95,7 @@ class csc_matrix_t {
   void print_matrix(FILE* fid) const;
 
   // Ensures no repeated row indices within a column
-  i_t check_matrix() const;
+  i_t check_matrix(std::string matrix_name = "") const;
 
   // Writes the matrix to a file in Matrix Market format
   void write_matrix_market(FILE* fid) const;
@@ -119,6 +111,19 @@ class csc_matrix_t {
   void scale_columns(const std::vector<f_t, Allocator>& scale);
 
   size_t hash() const;
+
+  bool is_diagonal() const
+  {
+    for (i_t j = 0; j < n; j++) {
+      const i_t column_start = col_start[j];
+      const i_t column_end   = col_start[j + 1];
+      for (i_t p = column_start; p < column_end; p++) {
+        const i_t row = i[p];
+        if (row != j) { return false; }
+      }
+    }
+    return true;
+  }
 
   i_t m;                       // number of rows
   i_t n;                       // number of columns
@@ -147,7 +152,20 @@ class csr_matrix_t {
   i_t remove_rows(std::vector<i_t>& row_marker, csr_matrix_t<i_t, f_t>& Aout) const;
 
   // Ensures no repeated column indices within a row
-  void check_matrix() const;
+  void check_matrix(std::string matrix_name = "") const;
+
+  bool is_diagonal() const
+  {
+    for (i_t i = 0; i < m; i++) {
+      const i_t current_row_start = row_start[i];
+      const i_t current_row_end   = row_start[i + 1];
+      for (i_t p = current_row_start; p < current_row_end; p++) {
+        const i_t col = j[p];
+        if (col != i) { return false; }
+      }
+    }
+    return true;
+  }
 
   i_t nz_max;                  // maximum number of nonzero entries
   i_t m;                       // number of rows

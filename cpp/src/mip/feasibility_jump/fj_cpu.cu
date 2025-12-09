@@ -1,19 +1,9 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights
- * reserved. SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
+/* clang-format on */
 
 #include <mip/mip_constants.hpp>
 
@@ -912,12 +902,13 @@ std::unique_ptr<fj_cpu_climber_t<i_t, f_t>> fj_t<i_t, f_t>::create_cpu_climber(
   const std::vector<f_t>& left_weights,
   const std::vector<f_t>& right_weights,
   f_t objective_weight,
+  std::atomic<bool>& preemption_flag,
   fj_settings_t settings,
   bool randomize_params)
 {
   raft::common::nvtx::range scope("fj_cpu_init");
 
-  auto fj_cpu = std::make_unique<fj_cpu_climber_t<i_t, f_t>>();
+  auto fj_cpu = std::make_unique<fj_cpu_climber_t<i_t, f_t>>(preemption_flag);
 
   // Initialize fj_cpu with all the data
   init_fj_cpu(*fj_cpu, solution, left_weights, right_weights, objective_weight);
@@ -942,7 +933,7 @@ bool fj_t<i_t, f_t>::cpu_solve(fj_cpu_climber_t<i_t, f_t>& fj_cpu, f_t in_time_l
   auto loop_start      = std::chrono::high_resolution_clock::now();
   auto time_limit      = std::chrono::milliseconds((int)(in_time_limit * 1000));
   auto loop_time_start = std::chrono::high_resolution_clock::now();
-  while (!fj_cpu.halted) {
+  while (!fj_cpu.halted && !fj_cpu.preemption_flag.load()) {
     // Check if 5 seconds have passed
     auto now = std::chrono::high_resolution_clock::now();
     if (in_time_limit < std::numeric_limits<f_t>::infinity() &&
@@ -1054,12 +1045,46 @@ bool fj_t<i_t, f_t>::cpu_solve(fj_cpu_climber_t<i_t, f_t>& fj_cpu, f_t in_time_l
   return fj_cpu.feasible_found;
 }
 
+template <typename i_t, typename f_t>
+cpu_fj_thread_t<i_t, f_t>::~cpu_fj_thread_t()
+{
+  this->request_termination();
+}
+
+template <typename i_t, typename f_t>
+void cpu_fj_thread_t<i_t, f_t>::run_worker()
+{
+  bool solution_found   = fj_ptr->cpu_solve(*fj_cpu, time_limit);
+  cpu_fj_solution_found = solution_found;
+}
+
+template <typename i_t, typename f_t>
+void cpu_fj_thread_t<i_t, f_t>::on_terminate()
+{
+  if (fj_cpu) fj_cpu->halted = true;
+}
+
+template <typename i_t, typename f_t>
+void cpu_fj_thread_t<i_t, f_t>::on_start()
+{
+  cuopt_assert(fj_cpu != nullptr, "fj_cpu must not be null");
+  fj_cpu->halted = false;
+}
+
+template <typename i_t, typename f_t>
+void cpu_fj_thread_t<i_t, f_t>::stop_cpu_solver()
+{
+  fj_cpu->halted = true;
+}
+
 #if MIP_INSTANTIATE_FLOAT
 template class fj_t<int, float>;
+template class cpu_fj_thread_t<int, float>;
 #endif
 
 #if MIP_INSTANTIATE_DOUBLE
 template class fj_t<int, double>;
+template class cpu_fj_thread_t<int, double>;
 #endif
 
 }  // namespace cuopt::linear_programming::detail

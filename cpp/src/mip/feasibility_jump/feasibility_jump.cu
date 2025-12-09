@@ -1,25 +1,16 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights
- * reserved. SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
+/* clang-format on */
 
 #include <cuopt/error.hpp>
 
 #include "feasibility_jump.cuh"
 #include "feasibility_jump_kernels.cuh"
 
+#include <mip/diversity/population.cuh>
 #include <mip/mip_constants.hpp>
 #include <mip/utils.cuh>
 #include <utilities/seed_generator.cuh>
@@ -711,10 +702,7 @@ void fj_t<i_t, f_t>::run_step_device(const rmm::cuda_stream_view& climber_stream
       data.cub_storage_bytes.resize(compaction_temp_storage_bytes, climber_stream);
     }
 
-    if (use_graph) {
-      cudaGraphCreate(&graph, 0);
-      cudaStreamBeginCapture(climber_stream, cudaStreamCaptureModeThreadLocal);
-    }
+    if (use_graph) { cudaStreamBeginCapture(climber_stream, cudaStreamCaptureModeThreadLocal); }
     for (i_t i = 0; i < (use_graph ? iterations_per_graph : 1); ++i) {
       {
         // related varialbe array has to be dynamically computed each iteration
@@ -880,7 +868,10 @@ i_t fj_t<i_t, f_t>::host_loop(solution_t<i_t, f_t>& solution, i_t climber_idx)
   for (steps = 0; steps < std::numeric_limits<i_t>::max(); steps += iterations_per_graph) {
     // to actualize time limit
     handle_ptr->sync_stream();
-    if (timer.check_time_limit() || steps >= settings.iteration_limit) { limit_reached = true; }
+    if (timer.check_time_limit() || steps >= settings.iteration_limit ||
+        context.preempt_heuristic_solver_.load()) {
+      limit_reached = true;
+    }
 
 #if !FJ_SINGLE_STEP
     if (steps % 500 == 0)

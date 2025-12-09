@@ -1,19 +1,9 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
  */
+/* clang-format on */
 
 // #include <dual_simplex/dense_vector.hpp>
 #include <dual_simplex/sparse_matrix.hpp>
@@ -167,6 +157,8 @@ void csc_matrix_t<i_t, f_t>::append_column(const std::vector<f_t>& x)
   i_t nz        = this->col_start[this->n];
   for (i_t j = 0; j < xsz; ++j) {
     if (x[j] != 0.0) {
+      assert(nz < this->i.size());
+      assert(nz < this->x.size());
       this->i[nz] = j;
       this->x[nz] = x[j];
       nz++;
@@ -187,6 +179,8 @@ void csc_matrix_t<i_t, f_t>::append_column(const sparse_vector_t<i_t, f_t>& x)
     const i_t i     = x.i[k];
     const f_t x_val = x.x[k];
     if (x_val != 0.0) {
+      assert(nz < this->i.size());
+      assert(nz < this->x.size());
       this->i[nz] = i;
       this->x[nz] = x_val;
       nz++;
@@ -204,6 +198,8 @@ void csc_matrix_t<i_t, f_t>::append_column(i_t x_nz, i_t* i, f_t* x)
     const i_t i_val = i[k];
     const f_t x_val = x[i_val];
     if (x_val != 0.0) {
+      assert(nz < this->i.size());
+      assert(nz < this->x.size());
       this->i[nz] = i_val;
       this->x[nz] = x_val;
       nz++;
@@ -504,8 +500,9 @@ i_t scatter(const csc_matrix_t<i_t, f_t>& A,
 }
 
 template <typename i_t, typename f_t>
-i_t csc_matrix_t<i_t, f_t>::check_matrix() const
+i_t csc_matrix_t<i_t, f_t>::check_matrix(std::string matrix_name) const
 {
+#ifdef CHECK_MATRIX
   std::vector<i_t> row_marker(this->m, -1);
   for (i_t j = 0; j < this->n; ++j) {
     const i_t col_start = this->col_start[j];
@@ -520,15 +517,19 @@ i_t csc_matrix_t<i_t, f_t>::check_matrix() const
     for (i_t p = col_start; p < col_end; ++p) {
       const i_t i = this->i[p];
       if (i < 0 || i >= this->m) {
-        printf("CSC error: row index %d not in range [0, %d]\n", i, this->m - 1);
+        printf("CSC error (%s) : row index %d not in range [0, %d]\n",
+               matrix_name.c_str(),
+               i,
+               this->m - 1);
       }
       if (row_marker[i] == j) {
-        printf("CSC error: repeated row index %d in column %d\n", i, j);
+        printf("CSC error (%s) : repeated row index %d in column %d\n", matrix_name.c_str(), i, j);
         return -1;
       }
       row_marker[i] = j;
     }
   }
+#endif
   return 0;
 }
 
@@ -558,7 +559,7 @@ size_t csc_matrix_t<i_t, f_t>::hash() const
 }
 
 template <typename i_t, typename f_t>
-void csr_matrix_t<i_t, f_t>::check_matrix() const
+void csr_matrix_t<i_t, f_t>::check_matrix(std::string matrix_name) const
 {
   std::vector<i_t> col_marker(this->n, -1);
   for (i_t i = 0; i < this->m; ++i) {
@@ -566,7 +567,9 @@ void csr_matrix_t<i_t, f_t>::check_matrix() const
     const i_t row_end   = this->row_start[i + 1];
     for (i_t p = row_start; p < row_end; ++p) {
       const i_t j = this->j[p];
-      if (col_marker[j] == i) { printf("CSR Error: repeated column index %d in row %d\n", j, i); }
+      if (col_marker[j] == i) {
+        printf("CSR Error (%s) : repeated column index %d in row %d\n", matrix_name.c_str(), j, i);
+      }
       col_marker[j] = i;
     }
   }

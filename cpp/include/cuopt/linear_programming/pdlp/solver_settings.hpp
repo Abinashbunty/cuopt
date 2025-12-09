@@ -1,19 +1,9 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2023-2025 NVIDIA CORPORATION &
- * AFFILIATES. All rights reserved. SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
+/* clang-format on */
 
 #pragma once
 
@@ -75,8 +65,6 @@ class pdlp_solver_settings_t {
  public:
   pdlp_solver_settings_t() = default;
 
-  // Copy constructor for when copying in the PDLP object
-  pdlp_solver_settings_t(const pdlp_solver_settings_t& other, rmm::cuda_stream_view stream_view);
   /**
    * @brief Set both absolute and relative tolerance on the primal feasibility,
    dual feasibility and gap.
@@ -220,9 +208,11 @@ class pdlp_solver_settings_t {
   bool first_primal_feasible{false};
   bool presolve{false};
   bool dual_postsolve{true};
+  int num_gpus{1};
   method_t method{method_t::Concurrent};
+  bool inside_mip{false};
   // For concurrent termination
-  volatile int* concurrent_halt;
+  volatile int* concurrent_halt{nullptr};
   static constexpr f_t minimal_absolute_tolerance = 1.0e-12;
 
  private:

@@ -1,19 +1,9 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights
- * reserved. SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2024-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
+/* clang-format on */
 
 #include "feasibility_jump/feasibility_jump.cuh"
 
@@ -74,6 +64,7 @@ struct branch_and_bound_solution_helper_t {
   void solution_callback(std::vector<f_t>& solution, f_t objective)
   {
     dm->population.add_external_solution(solution, objective, solution_origin_t::BRANCH_AND_BOUND);
+    dm->rins.new_best_incumbent_callback(solution);
   }
 
   void set_simplex_solution(std::vector<f_t>& solution,
@@ -81,6 +72,11 @@ struct branch_and_bound_solution_helper_t {
                             f_t objective)
   {
     dm->set_simplex_solution(solution, dual_solution, objective);
+  }
+
+  void node_processed_callback(const std::vector<f_t>& solution, f_t objective)
+  {
+    dm->rins.node_callback(solution, objective);
   }
 
   void preempt_heuristic_solver() { dm->population.preempt_heuristic_solver(); }
@@ -137,8 +133,7 @@ solution_t<i_t, f_t> mip_solver_t<i_t, f_t>::run_solver()
     auto lp_timer       = timer_t(settings.time_limit);
     settings.method     = method_t::Concurrent;
 
-    auto opt_sol = solve_lp_with_method<i_t, f_t>(
-      *context.problem_ptr->original_problem_ptr, *context.problem_ptr, settings, lp_timer);
+    auto opt_sol = solve_lp_with_method<i_t, f_t>(*context.problem_ptr, settings, lp_timer);
 
     solution_t<i_t, f_t> sol(*context.problem_ptr);
     sol.copy_new_assignment(host_copy(opt_sol.get_primal_solution()));
@@ -201,15 +196,32 @@ solution_t<i_t, f_t> mip_solver_t<i_t, f_t>::run_solver()
                 std::placeholders::_2,
                 std::placeholders::_3);
 
+    branch_and_bound_settings.node_processed_callback =
+      std::bind(&branch_and_bound_solution_helper_t<i_t, f_t>::node_processed_callback,
+                &solution_helper,
+                std::placeholders::_1,
+                std::placeholders::_2);
+
     // Create the branch and bound object
     branch_and_bound = std::make_unique<dual_simplex::branch_and_bound_t<i_t, f_t>>(
       branch_and_bound_problem, branch_and_bound_settings);
+    context.branch_and_bound_ptr = branch_and_bound.get();
+    branch_and_bound->set_concurrent_lp_root_solve(true);
 
     // Set the primal heuristics -> branch and bound callback
     context.problem_ptr->branch_and_bound_callback =
       std::bind(&dual_simplex::branch_and_bound_t<i_t, f_t>::set_new_solution,
                 branch_and_bound.get(),
                 std::placeholders::_1);
+    context.problem_ptr->set_root_relaxation_solution_callback =
+      std::bind(&dual_simplex::branch_and_bound_t<i_t, f_t>::set_root_relaxation_solution,
+                branch_and_bound.get(),
+                std::placeholders::_1,
+                std::placeholders::_2,
+                std::placeholders::_3,
+                std::placeholders::_4,
+                std::placeholders::_5,
+                std::placeholders::_6);
 
     // Fork a thread for branch and bound
     // std::async and std::future allow us to get the return value of bb::solve()
@@ -245,6 +257,7 @@ solution_t<i_t, f_t> mip_solver_t<i_t, f_t>::run_solver()
     return sol;
   }
   context.problem_ptr->post_process_solution(sol);
+  dm.rins.stop_rins();
   return sol;
 }
 

@@ -1,19 +1,9 @@
+/* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights
- * reserved. SPDX-License-Identifier: Apache-2.0
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
+/* clang-format on */
 
 #pragma once
 
@@ -126,6 +116,7 @@ class mps_parser_t {
   // QPS-specific data for quadratic programming
   /** Quadratic objective matrix entries */
   std::vector<std::tuple<i_t, i_t, f_t>> quadobj_entries{};
+  std::vector<std::tuple<i_t, i_t, f_t>> qmatrix_entries{};
 
  private:
   bool inside_rows_{false};
@@ -138,6 +129,7 @@ class mps_parser_t {
   bool inside_objname_{false};
   // QPS-specific parsing states
   bool inside_quadobj_{false};
+  bool inside_qmatrix_{false};
   std::unordered_set<std::string> encountered_sections{};
   std::unordered_map<std::string, i_t> row_names_map{};
   std::unordered_map<std::string, i_t> var_names_map{};
@@ -176,7 +168,7 @@ class mps_parser_t {
   i_t insert_range_value(std::string_view line, bool skip_range = true);
 
   // QPS-specific parsing methods
-  void parse_quadobj(std::string_view line);
+  void parse_quad(std::string_view line, bool is_quadobj);
 
 };  // class mps_parser_t
 
