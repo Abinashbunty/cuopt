@@ -1,6 +1,6 @@
 /* clang-format off */
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 /* clang-format on */
@@ -43,6 +43,48 @@
 namespace cuopt::linear_programming::dual_simplex {
 
 auto constexpr use_gpu = true;
+
+// non-template wrappers to work around clang compiler bug
+[[maybe_unused]] static void pairwise_multiply(
+  float* a, float* b, float* out, int size, rmm::cuda_stream_view stream)
+{
+  cub::DeviceTransform::Transform(
+    cuda::std::make_tuple(a, b), out, size, cuda::std::multiplies<>{}, stream);
+}
+
+[[maybe_unused]] static void pairwise_multiply(
+  double* a, double* b, double* out, int size, rmm::cuda_stream_view stream)
+{
+  cub::DeviceTransform::Transform(
+    cuda::std::make_tuple(a, b), out, size, cuda::std::multiplies<>{}, stream);
+}
+
+[[maybe_unused]] static void axpy(
+  float alpha, float* x, float beta, float* y, float* out, int size, rmm::cuda_stream_view stream)
+{
+  cub::DeviceTransform::Transform(
+    cuda::std::make_tuple(x, y),
+    out,
+    size,
+    [alpha, beta] __host__ __device__(float a, float b) { return alpha * a + beta * b; },
+    stream);
+}
+
+[[maybe_unused]] static void axpy(double alpha,
+                                  double* x,
+                                  double beta,
+                                  double* y,
+                                  double* out,
+                                  int size,
+                                  rmm::cuda_stream_view stream)
+{
+  cub::DeviceTransform::Transform(
+    cuda::std::make_tuple(x, y),
+    out,
+    size,
+    [alpha, beta] __host__ __device__(double a, double b) { return alpha * a + beta * b; },
+    stream);
+}
 
 template <typename i_t, typename f_t>
 class iteration_data_t {
@@ -265,6 +307,7 @@ class iteration_data_t {
     settings.log.printf("Density estimator time      : %.2fs\n", column_density_time);
     if ((settings.augmented != 0) &&
         (n_dense_columns > 50 || n_dense_rows > 10 ||
+         lp.A.m == 0 /* handle case with no constraints */ ||
          (max_row_nz > 5000 && estimated_nz_AAT > 1e10) || settings.augmented == 1)) {
       use_augmented   = true;
       n_dense_columns = 0;
@@ -275,6 +318,7 @@ class iteration_data_t {
       n_dense_columns = 0;
       use_augmented   = !Q_diagonal;
     }
+
     if (use_augmented) {
       settings.log.printf("Linear system               : augmented\n");
     } else {
@@ -1368,11 +1412,18 @@ class iteration_data_t {
     }
   }
 
+  template <typename T>
+  struct axpy_op {
+    T alpha;
+    T beta;
+    __host__ __device__ T operator()(T x, T y) const { return alpha * x + beta * y; }
+  };
+
   // y <- alpha * Augmented * x + beta * y
   void augmented_multiply(f_t alpha,
                           const dense_vector_t<i_t, f_t>& x,
                           f_t beta,
-                          dense_vector_t<i_t, f_t>& y) const
+                          dense_vector_t<i_t, f_t>& y)
   {
     const i_t m                 = A.m;
     const i_t n                 = A.n;
@@ -1381,22 +1432,43 @@ class iteration_data_t {
     dense_vector_t<i_t, f_t> y1 = y.head(n);
     dense_vector_t<i_t, f_t> y2 = y.tail(m);
 
+    rmm::device_uvector<f_t> d_x1(n, handle_ptr->get_stream());
+    rmm::device_uvector<f_t> d_x2(m, handle_ptr->get_stream());
+    rmm::device_uvector<f_t> d_y1(n, handle_ptr->get_stream());
+    rmm::device_uvector<f_t> d_y2(m, handle_ptr->get_stream());
+
+    raft::copy(d_x1.data(), x1.data(), n, handle_ptr->get_stream());
+    raft::copy(d_x2.data(), x2.data(), m, handle_ptr->get_stream());
+    raft::copy(d_y1.data(), y1.data(), n, handle_ptr->get_stream());
+    raft::copy(d_y2.data(), y2.data(), m, handle_ptr->get_stream());
+
     // y1 <- alpha ( -D * x_1 + A^T x_2) + beta * y1
-    dense_vector_t<i_t, f_t> r1(n);
-    diag.pairwise_product(x1, r1);
-    if (Q.n > 0) { matrix_vector_multiply(Q, 1.0, x1, 1.0, r1); }
-    y1.axpy(-alpha, r1, beta);
-    matrix_transpose_vector_multiply(A, alpha, x2, 1.0, y1);
 
+    rmm::device_uvector<f_t> d_r1(n, handle_ptr->get_stream());
+
+    // diag.pairwise_product(x1, r1);
+    // r1 <- D * x_1
+    pairwise_multiply(d_x1.data(), d_diag_.data(), d_r1.data(), n, stream_view_);
+
+    // r1 <- Q x1 + D x1
+    if (Q.n > 0) {
+      // matrix_vector_multiply(Q, 1.0, x1, 1.0, r1);
+      cusparse_Q_view_.spmv(1.0, d_x1, 1.0, d_r1);
+    }
+
+    // y1 <- - alpha * r1 + beta * y1
+    // y1.axpy(-alpha, r1, beta);
+    axpy(-alpha, d_r1.data(), beta, d_y1.data(), d_y1.data(), n, stream_view_);
+
+    // matrix_transpose_vector_multiply(A, alpha, x2, 1.0, y1);
+    cusparse_view_.transpose_spmv(alpha, d_x2, 1.0, d_y1);
     // y2 <- alpha ( A*x) + beta * y2
-    matrix_vector_multiply(A, alpha, x1, beta, y2);
+    // matrix_vector_multiply(A, alpha, x1, beta, y2);
+    cusparse_view_.spmv(alpha, d_x1, beta, d_y2);
 
-    for (i_t i = 0; i < n; ++i) {
-      y[i] = y1[i];
-    }
-    for (i_t i = n; i < n + m; ++i) {
-      y[i] = y2[i - n];
-    }
+    raft::copy(y.data(), d_y1.data(), n, stream_view_);
+    raft::copy(y.data() + n, d_y2.data(), m, stream_view_);
+    handle_ptr->sync_stream();
   }
 
   raft::handle_t const* handle_ptr;
@@ -1711,8 +1783,8 @@ int barrier_solver_t<i_t, f_t>::initial_point(iteration_data_t<i_t, f_t>& data)
     dense_vector_t<i_t, f_t> soln(lp.num_cols + lp.num_rows);
     i_t solve_status = data.chol->solve(rhs, soln);
     struct op_t {
-      op_t(const iteration_data_t<i_t, f_t>& data) : data_(data) {}
-      const iteration_data_t<i_t, f_t>& data_;
+      op_t(iteration_data_t<i_t, f_t>& data) : data_(data) {}
+      iteration_data_t<i_t, f_t>& data_;
       void a_multiply(f_t alpha,
                       const dense_vector_t<i_t, f_t>& x,
                       f_t beta,
@@ -2410,12 +2482,12 @@ i_t barrier_solver_t<i_t, f_t>::gpu_compute_search_direction(iteration_data_t<i_
     dense_vector_t<i_t, f_t> augmented_soln(lp.num_cols + lp.num_rows);
     data.chol->solve(augmented_rhs, augmented_soln);
     struct op_t {
-      op_t(const iteration_data_t<i_t, f_t>& data) : data_(data) {}
-      const iteration_data_t<i_t, f_t>& data_;
+      op_t(iteration_data_t<i_t, f_t>& data) : data_(data) {}
+      iteration_data_t<i_t, f_t>& data_;
       void a_multiply(f_t alpha,
                       const dense_vector_t<i_t, f_t>& x,
                       f_t beta,
-                      dense_vector_t<i_t, f_t>& y) const
+                      dense_vector_t<i_t, f_t>& y)
       {
         data_.augmented_multiply(alpha, x, beta, y);
       }

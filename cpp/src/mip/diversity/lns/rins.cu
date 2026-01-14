@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026, NVIDIA CORPORATION & AFFILIATES. All rights
  * reserved. SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -99,13 +99,16 @@ void rins_t<i_t, f_t>::run_rins()
 
   if (!dm.population.is_feasible()) return;
 
-  cuopt_assert(lp_optimal_solution.size() == problem_ptr->n_variables, "Assignment size mismatch");
+  cuopt_assert(lp_optimal_solution.size() == problem_copy->n_variables, "Assignment size mismatch");
   cuopt_assert(problem_copy->handle_ptr == &rins_handle, "Handle mismatch");
-  cuopt_assert(problem_copy->n_variables == problem_ptr->n_variables, "Problem size mismatch");
-  cuopt_assert(problem_copy->n_constraints == problem_ptr->n_constraints, "Problem size mismatch");
-  cuopt_assert(problem_copy->n_integer_vars == problem_ptr->n_integer_vars,
-               "Problem size mismatch");
-  cuopt_assert(problem_copy->n_binary_vars == problem_ptr->n_binary_vars, "Problem size mismatch");
+  // Do not make assertions based on problem_ptr. The original problem may have been modified within
+  // the FP loop relaxing integers cuopt_assert(problem_copy->n_variables ==
+  // problem_ptr->n_variables, "Problem size mismatch"); cuopt_assert(problem_copy->n_constraints ==
+  // problem_ptr->n_constraints, "Problem size mismatch"); cuopt_assert(problem_copy->n_integer_vars
+  // == problem_ptr->n_integer_vars,
+  //              "Problem size mismatch");
+  // cuopt_assert(problem_copy->n_binary_vars == problem_ptr->n_binary_vars, "Problem size
+  // mismatch");
   cuopt_assert(dm.population.current_size() > 0, "No solutions in population");
 
   solution_t<i_t, f_t> best_sol(*problem_copy);
@@ -128,21 +131,22 @@ void rins_t<i_t, f_t>::run_rins()
 
   i_t sol_size_before_rins = best_sol.assignment.size();
   auto lp_opt_device = cuopt::device_copy(this->lp_optimal_solution, rins_handle.get_stream());
-  cuopt_assert(lp_opt_device.size() == problem_ptr->n_variables, "Assignment size mismatch");
-  cuopt_assert(best_sol.assignment.size() == problem_ptr->n_variables, "Assignment size mismatch");
+  cuopt_assert(lp_opt_device.size() == problem_copy->n_variables, "Assignment size mismatch");
+  cuopt_assert(best_sol.assignment.size() == problem_copy->n_variables, "Assignment size mismatch");
 
-  rmm::device_uvector<i_t> vars_to_fix(problem_ptr->n_integer_vars, rins_handle.get_stream());
-  auto end = thrust::copy_if(rins_handle.get_thrust_policy(),
-                             problem_ptr->integer_indices.begin(),
-                             problem_ptr->integer_indices.end(),
-                             vars_to_fix.begin(),
-                             [lpopt     = lp_opt_device.data(),
-                              pb        = problem_ptr->view(),
-                              incumbent = best_sol.assignment.data()] __device__(i_t var_idx) {
-                               return pb.integer_equal(lpopt[var_idx], incumbent[var_idx]);
-                             });
+  rmm::device_uvector<i_t> vars_to_fix(problem_copy->n_integer_vars, rins_handle.get_stream());
+  auto end =
+    thrust::copy_if(rins_handle.get_thrust_policy(),
+                    problem_copy->integer_indices.begin(),
+                    problem_copy->integer_indices.end(),
+                    vars_to_fix.begin(),
+                    [lpopt     = lp_opt_device.data(),
+                     pb        = problem_copy->view(),
+                     incumbent = best_sol.assignment.data()] __device__(i_t var_idx) -> bool {
+                      return pb.integer_equal(lpopt[var_idx], incumbent[var_idx]);
+                    });
   vars_to_fix.resize(end - vars_to_fix.begin(), rins_handle.get_stream());
-  f_t fractional_ratio = (f_t)(vars_to_fix.size()) / (f_t)problem_ptr->n_integer_vars;
+  f_t fractional_ratio = (f_t)(vars_to_fix.size()) / (f_t)problem_copy->n_integer_vars;
 
   // abort if the fractional ratio is too low
   if (fractional_ratio < settings.min_fractional_ratio) {
@@ -164,7 +168,7 @@ void rins_t<i_t, f_t>::run_rins()
   cuopt_assert(thrust::all_of(rins_handle.get_thrust_policy(),
                               vars_to_fix.begin(),
                               vars_to_fix.end(),
-                              [pb = problem_ptr->view()] __device__(i_t var_idx) {
+                              [pb = problem_copy->view()] __device__(i_t var_idx) -> bool {
                                 return pb.is_integer_var(var_idx);
                               }),
                "All variables to fix must be integer variables");
@@ -180,7 +184,7 @@ void rins_t<i_t, f_t>::run_rins()
   CUOPT_LOG_DEBUG("Running RINS on solution with objective %g, fixing %d/%d",
                   best_sol.get_user_objective(),
                   vars_to_fix.size(),
-                  problem_ptr->n_integer_vars);
+                  problem_copy->n_integer_vars);
   CUOPT_LOG_DEBUG("RINS fixrate %g time limit %g", fixrate, time_limit);
   CUOPT_LOG_DEBUG("RINS fractional ratio %g%%", fractional_ratio * 100);
 
@@ -188,7 +192,7 @@ void rins_t<i_t, f_t>::run_rins()
 
   auto [fixed_problem, fixed_assignment, variable_map] = best_sol.fix_variables(vars_to_fix);
   CUOPT_LOG_DEBUG(
-    "new var count %d var_count %d", fixed_problem.n_variables, problem_ptr->n_integer_vars);
+    "new var count %d var_count %d", fixed_problem.n_variables, problem_copy->n_integer_vars);
 
   // should probably just do an spmv to get the objective instead. ugly mess of copies
   solution_t<i_t, f_t> best_sol_fixed_space(fixed_problem);
@@ -217,7 +221,7 @@ void rins_t<i_t, f_t>::run_rins()
     &rins_handle, &fixed_problem, context.settings, context.scaling);
   fj_t<i_t, f_t> fj(fj_context);
   solution_t<i_t, f_t> fj_solution(fixed_problem);
-  fj_solution.copy_new_assignment(cuopt::host_copy(fixed_assignment));
+  fj_solution.copy_new_assignment(cuopt::host_copy(fixed_assignment, rins_handle.get_stream()));
   std::vector<f_t> default_weights(fixed_problem.n_constraints, 1.);
   cpu_fj_thread_t<i_t, f_t> cpu_fj_thread;
   cpu_fj_thread.fj_cpu             = fj.create_cpu_climber(fj_solution,
@@ -258,8 +262,8 @@ void rins_t<i_t, f_t>::run_rins()
   branch_and_bound_settings.num_diving_threads = 1;
   branch_and_bound_settings.log.log            = false;
   branch_and_bound_settings.log.log_prefix     = "[RINS] ";
-  branch_and_bound_settings.solution_callback  = [this, &rins_solution_queue](
-                                                  std::vector<f_t>& solution, f_t objective) {
+  branch_and_bound_settings.solution_callback  = [&rins_solution_queue](std::vector<f_t>& solution,
+                                                                       f_t objective) {
     rins_solution_queue.push_back(solution);
   };
   dual_simplex::branch_and_bound_t<i_t, f_t> branch_and_bound(branch_and_bound_problem,
@@ -271,7 +275,8 @@ void rins_t<i_t, f_t>::run_rins()
     CUOPT_LOG_DEBUG("RINS submip solution found. Objective %.16e. Status %d",
                     branch_and_bound_solution.objective,
                     int(branch_and_bound_status));
-    cuopt_assert(rins_solution_queue.size() > 0, "RINS solution queue is unexpectedly empty");
+    // RINS submip may have just proved the initial guess is the optimal, therefore the queue might
+    // be empty in that case
   }
   if (branch_and_bound_status == dual_simplex::mip_status_t::OPTIMAL) {
     CUOPT_LOG_DEBUG("RINS submip optimal");
@@ -328,7 +333,7 @@ void rins_t<i_t, f_t>::run_rins()
       cuopt_assert(best_sol.test_number_all_integer(), "All must be integers after RINS");
       if (best_sol.get_user_objective() < prev_obj) { improvement_found = true; }
       cuopt_assert(best_sol.assignment.size() == sol_size_before_rins, "Assignment size mismatch");
-      cuopt_assert(best_sol.assignment.size() == problem_ptr->n_variables,
+      cuopt_assert(best_sol.assignment.size() == problem_copy->n_variables,
                    "Assignment size mismatch");
       dm.population.add_external_solution(
         best_sol.get_host_assignment(), best_sol.get_objective(), solution_origin_t::RINS);

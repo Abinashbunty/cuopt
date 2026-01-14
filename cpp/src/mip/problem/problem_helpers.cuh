@@ -185,9 +185,13 @@ __global__ void kernel_check_transpose_validity(raft::device_span<const f_t> coe
     __syncthreads();
     // Would want to assert there but no easy way to gtest it, so moved it to the host
     if (!shared_found) {
-      DEVICE_LOG_DEBUG(
-        "For cstr %d, var %d, value %f was not found in the transpose", constraint_id, col, value);
-      *failed = true;
+      if (threadIdx.x == 0) {
+        DEVICE_LOG_DEBUG("For cstr %d, var %d, value %f was not found in the transpose",
+                         constraint_id,
+                         col,
+                         value);
+        *failed = true;
+      }
       return;
     }
     __syncthreads();
@@ -218,11 +222,8 @@ static bool check_transpose_validity(const rmm::device_uvector<f_t>& coefficient
       raft::device_span<const i_t>(reverse_offsets.data(), reverse_offsets.size()),
       raft::device_span<const i_t>(reverse_variables.data(), reverse_variables.size()),
       failed.data());
-  RAFT_CUDA_TRY(cudaStreamSynchronize(handle_ptr->get_stream()));
   RAFT_CUDA_TRY(cudaPeekAtLastError());
-  cuopt_assert(!failed.value(handle_ptr->get_stream()),
-               "Difference between the matrix and its transpose");
-  return true;
+  return !failed.value(handle_ptr->get_stream());
 }
 
 template <typename i_t, typename f_t>
@@ -249,7 +250,7 @@ static void check_csr_representation([[maybe_unused]] const rmm::device_uvector<
   cuopt_assert(thrust::all_of(handle_ptr->get_thrust_policy(),
                               variables.cbegin(),
                               variables.cend(),
-                              [n_variables = n_variables] __device__(i_t val) {
+                              [n_variables = n_variables] __device__(i_t val) -> bool {
                                 return val >= 0 && val < n_variables;
                               }),
                "A_indices values must positive lower than the number of variables (c size).");
@@ -266,7 +267,7 @@ static bool check_var_bounds_sanity(const detail::problem_t<i_t, f_t>& problem)
                    thrust::counting_iterator(0),
                    thrust::counting_iterator((i_t)problem.variable_bounds.size()),
                    [tolerance = problem.tolerances.presolve_absolute_tolerance,
-                    var_bnd   = make_span(problem.variable_bounds)] __device__(i_t index) {
+                    var_bnd   = make_span(problem.variable_bounds)] __device__(i_t index) -> bool {
                      auto var_bounds = var_bnd[index];
                      return (get_lower(var_bounds) > get_upper(var_bounds) + tolerance);
                    });
@@ -282,7 +283,7 @@ static bool check_constraint_bounds_sanity(const detail::problem_t<i_t, f_t>& pr
                    thrust::counting_iterator((i_t)problem.constraint_lower_bounds.size()),
                    [tolerance = problem.tolerances.presolve_absolute_tolerance,
                     lb        = make_span(problem.constraint_lower_bounds),
-                    ub        = make_span(problem.constraint_upper_bounds)] __device__(i_t index) {
+                    ub = make_span(problem.constraint_upper_bounds)] __device__(i_t index) -> bool {
                      return (lb[index] > ub[index] + tolerance);
                    });
   return !crossing_bounds_detected;
